@@ -28,6 +28,7 @@ from sqlalchemy import (
     String,
     Float,
     Boolean,
+    BigInteger,
     Date,
     DateTime,
     Integer,
@@ -624,16 +625,463 @@ class LLMUsage(Base):
     called_at = Column(DateTime, default=datetime.now, index=True)
 
 
+# ============================================================
+# 市场全景数据模型（源自 feat-0427-spiderdata2db，合并到主项目）
+# ============================================================
+
+class MarketIndexData(Base):
+    """
+    全市场指数日线快照
+
+    覆盖上证指数、深证综指、创业板指、科创50等主要指数。
+    """
+    __tablename__ = 'market_indices'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False)
+    index_code = Column(String(32), nullable=False)
+    index_name = Column(String(128), nullable=False)
+    latest_price = Column(Float)
+    change_percent = Column(Float)
+    change_amount = Column(Float)
+    volume = Column(BigInteger)
+    amount = Column(Float)
+    amplitude = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    open = Column(Float)
+    pre_close = Column(Float)
+    volume_ratio = Column(Float)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('trade_date', 'index_code', name='uix_market_index_date_code'),
+        Index('ix_market_index_trade_date', 'trade_date'),
+        Index('ix_market_index_code', 'index_code'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'trade_date': self.trade_date.isoformat() if self.trade_date else None,
+            'index_code': self.index_code,
+            'index_name': self.index_name,
+            'latest_price': self.latest_price,
+            'change_percent': self.change_percent,
+            'change_amount': self.change_amount,
+            'volume': self.volume,
+            'amount': self.amount,
+            'amplitude': self.amplitude,
+            'high': self.high,
+            'low': self.low,
+            'open': self.open,
+            'pre_close': self.pre_close,
+            'volume_ratio': self.volume_ratio,
+        }
+
+
+class MarketBoard(Base):
+    """
+    行业板块与概念板块日线快照
+
+    同时支持东方财富(source='em')和同花顺(source='ths')双数据源，
+    通过 source 字段区分，同一天同名板块可以共存。
+    """
+    __tablename__ = 'market_boards'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False)
+    board_type = Column(String(16), nullable=False)
+    board_code = Column(String(32))
+    board_name = Column(String(128), nullable=False)
+    latest_price = Column(Float)
+    change_percent = Column(Float)
+    change_amount = Column(Float)
+    volume = Column(BigInteger)
+    amount = Column(Float)
+    amplitude = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    open = Column(Float)
+    pre_close = Column(Float)
+    volume_ratio = Column(Float)
+    stock_count = Column(Integer)
+    leading_stock = Column(String(128))
+    leading_change = Column(Float)
+    source = Column(String(16), default='em')
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'trade_date', 'board_type', 'board_name', 'source',
+            name='uix_market_board_date_type_name_source',
+        ),
+        Index('ix_market_board_trade_date', 'trade_date'),
+        Index('ix_market_board_type', 'board_type'),
+        Index('ix_market_board_name', 'board_name'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'trade_date': self.trade_date.isoformat() if self.trade_date else None,
+            'board_type': self.board_type,
+            'board_code': self.board_code,
+            'board_name': self.board_name,
+            'latest_price': self.latest_price,
+            'change_percent': self.change_percent,
+            'change_amount': self.change_amount,
+            'volume': self.volume,
+            'amount': self.amount,
+            'amplitude': self.amplitude,
+            'high': self.high,
+            'low': self.low,
+            'open': self.open,
+            'pre_close': self.pre_close,
+            'volume_ratio': self.volume_ratio,
+            'stock_count': self.stock_count,
+            'leading_stock': self.leading_stock,
+            'leading_change': self.leading_change,
+            'source': self.source,
+        }
+
+
+class ZTPoolStock(Base):
+    """
+    涨停/跌停/炸板股池
+
+    pool_type: 'zt'=涨停, 'dt'=跌停, 'zb'=炸板
+    """
+    __tablename__ = 'zt_pool'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False)
+    pool_type = Column(String(8), nullable=False)
+    stock_code = Column(String(16), nullable=False)
+    stock_name = Column(String(128))
+    latest_price = Column(Float)
+    change_percent = Column(Float)
+    zt_price = Column(Float)
+    volume = Column(BigInteger)
+    amount = Column(Float)
+    limit_up_time = Column(String(8))
+    limit_up_type = Column(String(64))
+    consecutive_boards = Column(Integer)
+    industry = Column(String(128))
+    dt_price = Column(Float)
+    zb_info = Column(Text)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'trade_date', 'pool_type', 'stock_code',
+            name='uix_zt_pool_date_type_code',
+        ),
+        Index('ix_zt_pool_trade_date', 'trade_date'),
+        Index('ix_zt_pool_type', 'pool_type'),
+        Index('ix_zt_pool_stock_code', 'stock_code'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'trade_date': self.trade_date.isoformat() if self.trade_date else None,
+            'pool_type': self.pool_type,
+            'stock_code': self.stock_code,
+            'stock_name': self.stock_name,
+            'latest_price': self.latest_price,
+            'change_percent': self.change_percent,
+            'zt_price': self.zt_price,
+            'volume': self.volume,
+            'amount': self.amount,
+            'limit_up_time': self.limit_up_time,
+            'limit_up_type': self.limit_up_type,
+            'consecutive_boards': self.consecutive_boards,
+            'industry': self.industry,
+            'dt_price': self.dt_price,
+            'zb_info': self.zb_info,
+        }
+
+
+class StrongStock(Base):
+    """强势股池"""
+    __tablename__ = 'strong_stocks'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False)
+    stock_code = Column(String(16), nullable=False)
+    stock_name = Column(String(128))
+    latest_price = Column(Float)
+    change_percent = Column(Float)
+    volume = Column(BigInteger)
+    amount = Column(Float)
+    turnover_rate = Column(Float)
+    market_cap = Column(Float)
+    consecutive_boards = Column(Integer)
+    industry = Column(String(128))
+    reason = Column(Text)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'trade_date', 'stock_code',
+            name='uix_strong_stock_date_code',
+        ),
+        Index('ix_strong_stock_trade_date', 'trade_date'),
+        Index('ix_strong_stock_code', 'stock_code'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'trade_date': self.trade_date.isoformat() if self.trade_date else None,
+            'stock_code': self.stock_code,
+            'stock_name': self.stock_name,
+            'latest_price': self.latest_price,
+            'change_percent': self.change_percent,
+            'volume': self.volume,
+            'amount': self.amount,
+            'turnover_rate': self.turnover_rate,
+            'market_cap': self.market_cap,
+            'consecutive_boards': self.consecutive_boards,
+            'industry': self.industry,
+            'reason': self.reason,
+        }
+
+
+class LHBBasic(Base):
+    """
+    龙虎榜上榜个股基本信息
+    """
+    __tablename__ = 'lhb_basic'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False)
+    stock_code = Column(String(16), nullable=False)
+    stock_name = Column(String(128))
+    close_price = Column(Float)
+    change_percent = Column(Float)
+    turnover_rate = Column(Float)
+    lhb_reason = Column(Text)
+    net_buy_amount = Column(Float)
+    buy_amount = Column(Float)
+    sell_amount = Column(Float)
+    total_amount = Column(Float)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'trade_date', 'stock_code', 'lhb_reason',
+            name='uix_lhb_basic_date_code_reason',
+        ),
+        Index('ix_lhb_basic_trade_date', 'trade_date'),
+        Index('ix_lhb_basic_stock_code', 'stock_code'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'trade_date': self.trade_date.isoformat() if self.trade_date else None,
+            'stock_code': self.stock_code,
+            'stock_name': self.stock_name,
+            'close_price': self.close_price,
+            'change_percent': self.change_percent,
+            'turnover_rate': self.turnover_rate,
+            'lhb_reason': self.lhb_reason,
+            'net_buy_amount': self.net_buy_amount,
+            'buy_amount': self.buy_amount,
+            'sell_amount': self.sell_amount,
+            'total_amount': self.total_amount,
+        }
+
+
+class LHBStockDetail(Base):
+    """
+    龙虎榜个股席位交易明细
+
+    子表，关联 lhb_basic.id
+    """
+    __tablename__ = 'lhb_stock_detail'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    lhb_basic_id = Column(
+        Integer,
+        ForeignKey('lhb_basic.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    trade_date = Column(Date, nullable=False)
+    stock_code = Column(String(16), nullable=False)
+    seat_name = Column(String(256))
+    seat_type = Column(String(8))
+    amount = Column(Float)
+    amount_percent = Column(Float)
+    buy_count_3m = Column(Integer)
+    sell_count_3m = Column(Integer)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'lhb_basic_id', 'stock_code', 'seat_name',
+            name='uix_lhb_detail_basic_stock_seat',
+        ),
+        Index('ix_lhb_detail_basic_id', 'lhb_basic_id'),
+        Index('ix_lhb_detail_trade_date', 'trade_date'),
+        Index('ix_lhb_detail_seat', 'seat_name'),
+        Index('ix_lhb_detail_seat_date', 'seat_name', 'trade_date'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'lhb_basic_id': self.lhb_basic_id,
+            'trade_date': self.trade_date.isoformat() if self.trade_date else None,
+            'stock_code': self.stock_code,
+            'seat_name': self.seat_name,
+            'seat_type': self.seat_type,
+            'amount': self.amount,
+            'amount_percent': self.amount_percent,
+            'buy_count_3m': self.buy_count_3m,
+            'sell_count_3m': self.sell_count_3m,
+        }
+
+
+class LHBStockStatistic(Base):
+    """
+    个股龙虎榜近3个月上榜统计缓存
+    """
+    __tablename__ = 'lhb_stock_statistic'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False)
+    stock_code = Column(String(16), nullable=False)
+    stock_name = Column(String(128))
+    appear_count_3m = Column(Integer)
+    buy_amount_3m = Column(Float)
+    sell_amount_3m = Column(Float)
+    net_buy_3m = Column(Float)
+    buy_seat_count = Column(Integer)
+    sell_seat_count = Column(Integer)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'trade_date', 'stock_code',
+            name='uix_lhb_stat_date_code',
+        ),
+        Index('ix_lhb_stat_trade_date', 'trade_date'),
+        Index('ix_lhb_stat_stock_code', 'stock_code'),
+        Index('ix_lhb_stat_updated', 'updated_at'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'trade_date': self.trade_date.isoformat() if self.trade_date else None,
+            'stock_code': self.stock_code,
+            'stock_name': self.stock_name,
+            'appear_count_3m': self.appear_count_3m,
+            'buy_amount_3m': self.buy_amount_3m,
+            'sell_amount_3m': self.sell_amount_3m,
+            'net_buy_3m': self.net_buy_3m,
+            'buy_seat_count': self.buy_seat_count,
+            'sell_seat_count': self.sell_seat_count,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class LHBYybMost(Base):
+    """
+    龙虎榜营业部排行 — 上榜次数最多
+    """
+    __tablename__ = 'lhb_yyb_most'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fetch_date = Column(Date, nullable=False)
+    rank = Column(Integer)
+    seat_name = Column(String(256), nullable=False)
+    appear_count = Column(Integer)
+    buy_amount = Column(Float)
+    buy_count = Column(Integer)
+    sell_amount = Column(Float)
+    sell_count = Column(Integer)
+    net_buy_amount = Column(Float)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'fetch_date', 'seat_name',
+            name='uix_lhb_yyb_most_date_seat',
+        ),
+        Index('ix_lhb_yyb_most_fetch_date', 'fetch_date'),
+        Index('ix_lhb_yyb_most_seat', 'seat_name'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'fetch_date': self.fetch_date.isoformat() if self.fetch_date else None,
+            'rank': self.rank,
+            'seat_name': self.seat_name,
+            'appear_count': self.appear_count,
+            'buy_amount': self.buy_amount,
+            'buy_count': self.buy_count,
+            'sell_amount': self.sell_amount,
+            'sell_count': self.sell_count,
+            'net_buy_amount': self.net_buy_amount,
+        }
+
+
+class LHBYybCapital(Base):
+    """
+    龙虎榜营业部排行 — 资金实力最强
+    """
+    __tablename__ = 'lhb_yyb_capital'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fetch_date = Column(Date, nullable=False)
+    rank = Column(Integer)
+    seat_name = Column(String(256), nullable=False)
+    total_amount = Column(Float)
+    buy_amount = Column(Float)
+    sell_amount = Column(Float)
+    net_buy_amount = Column(Float)
+    avg_amount_per_trade = Column(Float)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'fetch_date', 'seat_name',
+            name='uix_lhb_yyb_capital_date_seat',
+        ),
+        Index('ix_lhb_yyb_capital_fetch_date', 'fetch_date'),
+        Index('ix_lhb_yyb_capital_seat', 'seat_name'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'fetch_date': self.fetch_date.isoformat() if self.fetch_date else None,
+            'rank': self.rank,
+            'seat_name': self.seat_name,
+            'total_amount': self.total_amount,
+            'buy_amount': self.buy_amount,
+            'sell_amount': self.sell_amount,
+            'net_buy_amount': self.net_buy_amount,
+            'avg_amount_per_trade': self.avg_amount_per_trade,
+        }
+
+
 class DatabaseManager:
     """
     数据库管理器 - 单例模式
-    
+
     职责：
     1. 管理数据库连接池
     2. 提供 Session 上下文管理
     3. 封装数据存取操作
     """
-    
+
     _instance: Optional['DatabaseManager'] = None
     _initialized: bool = False
     

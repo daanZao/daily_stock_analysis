@@ -78,3 +78,9 @@ verify_*.py
 static/
 /apps/dsa-desktop/dist/
 /apps/dsa-desktop/node_modules/
+
+# 策略文件
+.strategies
+
+# 用户设计文档，中间态的文档
+_userwork

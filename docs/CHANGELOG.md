@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
+- [新功能] 新增 9 张市场全景数据表（market_indices、market_boards、zt_pool、strong_stocks、lhb_*、yyb_*），支持收盘后自动持久化指数/板块/涨跌停/龙虎榜等数据
+- [新功能] 新增 MarketDataRepository 数据仓库层，提供 SQLite UPSERT、缺失日期检测、跨表查询等能力
+- [新功能] 新增 MarketDataSync 收盘同步模块，在 run_full_analysis 个股分析完成后自动抓取并保存市场全景数据
+- [新功能] BaostockFetcher 新增 get_all_securities / get_all_securities_csv 接口，支持获取某日全市场证券列表并导出 CSV
+- [新功能] DataFetcherManager 暴露 get_all_securities 方法，自动遍历支持该接口的数据源
+- [新功能] 新增 MARKET_DATA_SYNC_ENABLED 环境变量开关（默认 true），控制收盘市场数据同步行为
+- [改进] MarketDataSync 默认使用 get_effective_trading_date("cn") 对齐最近交易日，避免节假日/跨日边界的数据日期错位
+- [文档] 新增 docs/DATA_PIPELINE.md，阐述项目 A 股数据抓取、持久化、多源对齐与消费的全景链路
 
 ## [3.14.1] - 2026-04-26
 

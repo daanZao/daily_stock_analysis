@@ -15,9 +15,10 @@ BaostockFetcher - 备用数据源 2 (Priority 3)
 """
 
 import logging
+import os
 import re
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional, Generator
 
 import pandas as pd
@@ -321,9 +322,9 @@ class BaostockFetcher(BaseFetcher):
     def get_stock_list(self) -> Optional[pd.DataFrame]:
         """
         获取股票列表
-        
+
         使用 Baostock 的 query_stock_basic 接口获取全部股票列表
-        
+
         Returns:
             包含 code, name 列的 DataFrame，失败返回 None
         """
@@ -331,32 +332,145 @@ class BaostockFetcher(BaseFetcher):
             with self._baostock_session() as bs:
                 # 查询所有股票基本信息
                 rs = bs.query_stock_basic()
-                
+
                 if rs.error_code == '0':
                     data_list = []
                     while rs.next():
                         data_list.append(rs.get_row_data())
-                    
+
                     if data_list:
                         df = pd.DataFrame(data_list, columns=rs.fields)
-                        
+
                         # 转换代码格式（去除 sh. 或 sz. 前缀）
                         df['code'] = df['code'].apply(lambda x: x.split('.')[1] if '.' in x else x)
                         df = df.rename(columns={'code_name': 'name'})
-                        
+
                         # 更新缓存
                         if not hasattr(self, '_stock_name_cache'):
                             self._stock_name_cache = {}
                         for _, row in df.iterrows():
                             self._stock_name_cache[row['code']] = row['name']
-                        
+
                         logger.info(f"Baostock 获取股票列表成功: {len(df)} 条")
                         return df[['code', 'name']]
-                
+
         except Exception as e:
             logger.warning(f"Baostock 获取股票列表失败: {e}")
-        
+
         return None
+
+    def get_all_securities(self, day: Optional[str] = None) -> Optional[pd.DataFrame]:
+        """
+        获取某交易日的全部证券列表（含股票、指数、基金等）
+
+        使用 Baostock 的 query_all_stock 接口。
+        返回的 DataFrame 包含以下列：
+            - code:        证券代码（原始格式，如 sh.600000 / sz.000001）
+            - code_name:   证券名称
+            - ipo_date:    上市日期
+            - out_date:    退市日期（未退市为空）
+            - type:        证券类型（1=股票, 2=指数, 3=其它）
+            - status:      上市状态（1=上市, 0=退市）
+
+        Args:
+            day: 查询日期，格式 "YYYY-MM-DD"，默认最近交易日
+
+        Returns:
+            全市场证券 DataFrame，失败返回 None
+        """
+        if day is None:
+            # 默认取最近一个交易日（简单处理：如果今天是周末，取周五）
+            today = date.today()
+            weekday = today.weekday()
+            if weekday >= 5:  # 周六或周日
+                offset = weekday - 4
+                day = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
+            else:
+                day = today.strftime("%Y-%m-%d")
+
+        try:
+            with self._baostock_session() as bs:
+                rs = bs.query_all_stock(day=day)
+
+                if rs.error_code != '0':
+                    logger.warning(f"Baostock query_all_stock 失败: {rs.error_msg}")
+                    return None
+
+                data_list = []
+                while rs.next():
+                    data_list.append(rs.get_row_data())
+
+                if not data_list:
+                    logger.warning(f"Baostock query_all_stock({day}) 返回空数据")
+                    return None
+
+                df = pd.DataFrame(data_list, columns=rs.fields)
+
+                # 统一列名（snake_case）
+                rename_map = {
+                    'code': 'code',
+                    'code_name': 'code_name',
+                    'ipoDate': 'ipo_date',
+                    'outDate': 'out_date',
+                    'type': 'type',
+                    'status': 'status',
+                }
+                df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+                # 添加可读映射
+                type_map = {'1': 'stock', '2': 'index', '3': 'other'}
+                status_map = {'1': 'listed', '0': 'delisted'}
+                if 'type' in df.columns:
+                    df['type_name'] = df['type'].astype(str).map(type_map).fillna('unknown')
+                if 'status' in df.columns:
+                    df['status_name'] = df['status'].astype(str).map(status_map).fillna('unknown')
+
+                # 提取纯数字代码（方便下游使用）
+                df['pure_code'] = df['code'].apply(lambda x: x.split('.')[1] if isinstance(x, str) and '.' in x else x)
+
+                # 按类型分组计数日志
+                if 'type_name' in df.columns:
+                    counts = df['type_name'].value_counts().to_dict()
+                    logger.info(f"Baostock 获取 {day} 全市场证券: {len(df)} 条, 分类={counts}")
+                else:
+                    logger.info(f"Baostock 获取 {day} 全市场证券: {len(df)} 条")
+
+                return df
+
+        except Exception as e:
+            logger.warning(f"Baostock 获取全市场证券失败: {e}")
+            return None
+
+    def get_all_securities_csv(self, day: Optional[str] = None, output_path: Optional[str] = None) -> Optional[str]:
+        """
+        获取某日全市场证券并保存为 CSV
+
+        Args:
+            day: 查询日期，格式 "YYYY-MM-DD"，默认最近交易日
+            output_path: CSV 保存路径，默认 ./data/all_securities_YYYY-MM-DD.csv
+
+        Returns:
+            保存的 CSV 文件路径，失败返回 None
+        """
+        df = self.get_all_securities(day=day)
+        if df is None or df.empty:
+            return None
+
+        if day is None:
+            day = date.today().strftime("%Y-%m-%d")
+
+        if output_path is None:
+            data_dir = os.path.join(os.getcwd(), "data")
+            os.makedirs(data_dir, exist_ok=True)
+            output_path = os.path.join(data_dir, f"all_securities_{day}.csv")
+
+        try:
+            df.to_csv(output_path, index=False, encoding='utf-8-sig')
+            logger.info(f"全市场证券 CSV 已保存: {output_path} ({len(df)} 条)")
+            return output_path
+        except Exception as e:
+            logger.warning(f"保存 CSV 失败: {e}")
+            return None
 
 
 if __name__ == "__main__":

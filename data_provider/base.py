@@ -1666,6 +1666,28 @@ class DataFetcherManager:
                 continue
         return {}
 
+    def get_all_securities(self, day: Optional[str] = None) -> Optional[pd.DataFrame]:
+        """获取某日全市场证券列表（优先 Baostock）
+
+        Args:
+            day: 查询日期，格式 "YYYY-MM-DD"
+
+        Returns:
+            包含 code, code_name, ipo_date, out_date, type, status 等列的 DataFrame
+        """
+        for fetcher in self._fetchers:
+            if hasattr(fetcher, 'get_all_securities'):
+                try:
+                    df = self._call_fetcher_method(fetcher, 'get_all_securities', day=day)
+                    if df is not None and not df.empty:
+                        logger.info(f"[{fetcher.name}] 获取全市场证券列表成功: {len(df)} 条")
+                        return df
+                except Exception as e:
+                    logger.warning(f"[{fetcher.name}] 获取全市场证券列表失败: {e}")
+                    continue
+        logger.warning("[全市场证券] 所有数据源均失败")
+        return None
+
     def _run_with_timeout(
         self,
         task: Callable[[], Any],

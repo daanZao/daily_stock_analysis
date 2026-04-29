@@ -470,6 +470,19 @@ def run_full_analysis(
             merge_notification=merge_notification
         )
 
+        # 1.5 收盘市场数据同步（指数/板块/涨跌停/龙虎榜等）
+        try:
+            if getattr(config, 'market_data_sync_enabled', True) and effective_region != '':
+                from src.core.market_data_sync import MarketDataSync
+
+                sync = MarketDataSync(
+                    fetcher_manager=pipeline.fetcher_manager,
+                    config=config,
+                )
+                sync.sync_all()
+        except Exception as e:
+            logger.warning(f"收盘市场数据同步失败（已忽略）: {e}")
+
         # Issue #128: 分析间隔 - 在个股分析和大盘分析之间添加延迟
         analysis_delay = getattr(config, 'analysis_delay', 0)
         if (
