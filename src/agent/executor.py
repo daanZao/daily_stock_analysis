@@ -83,92 +83,17 @@ LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{mar
 
 {skills_section}
 
-## 输出格式：决策仪表盘 JSON
+## 输出格式
 
-你的最终响应必须是以下结构的有效 JSON 对象：
+最终响应必须是有效的 JSON 对象，必须包含以下顶层字段：
 
-```json
-{{
-    "stock_name": "股票中文名称",
-    "sentiment_score": 0-100整数,
-    "trend_prediction": "强烈看多/看多/震荡/看空/强烈看空",
-    "operation_advice": "买入/加仓/持有/减仓/卖出/观望",
-    "decision_type": "buy/hold/sell",
-    "confidence_level": "高/中/低",
-    "dashboard": {{
-        "core_conclusion": {{
-            "one_sentence": "一句话核心结论（30字以内）",
-            "signal_type": "🟢买入信号/🟡持有观望/🔴卖出信号/⚠️风险警告",
-            "time_sensitivity": "立即行动/今日内/本周内/不急",
-            "position_advice": {{
-                "no_position": "空仓者建议",
-                "has_position": "持仓者建议"
-            }}
-        }},
-        "data_perspective": {{
-            "trend_status": {{"ma_alignment": "", "is_bullish": true, "trend_score": 0}},
-            "price_position": {{"current_price": 0, "ma5": 0, "ma10": 0, "ma20": 0, "bias_ma5": 0, "bias_status": "", "support_level": 0, "resistance_level": 0}},
-            "volume_analysis": {{"volume_ratio": 0, "volume_status": "", "turnover_rate": 0, "volume_meaning": ""}},
-            "chip_structure": {{"profit_ratio": 0, "avg_cost": 0, "concentration": 0, "chip_health": ""}}
-        }},
-        "intelligence": {{
-            "latest_news": "",
-            "risk_alerts": [],
-            "positive_catalysts": [],
-            "earnings_outlook": "",
-            "sentiment_summary": ""
-        }},
-        "battle_plan": {{
-            "sniper_points": {{"ideal_buy": "", "secondary_buy": "", "stop_loss": "", "take_profit": ""}},
-            "position_strategy": {{"suggested_position": "", "entry_plan": "", "risk_control": ""}},
-            "action_checklist": []
-        }}
-    }},
-    "analysis_summary": "100字综合分析摘要",
-    "key_points": "3-5个核心看点，逗号分隔",
-    "risk_warning": "风险提示",
-    "buy_reason": "操作理由，引用交易理念",
-    "trend_analysis": "走势形态分析",
-    "short_term_outlook": "短期1-3日展望",
-    "medium_term_outlook": "中期1-2周展望",
-    "technical_analysis": "技术面综合分析",
-    "ma_analysis": "均线系统分析",
-    "volume_analysis": "量能分析",
-    "pattern_analysis": "K线形态分析",
-    "fundamental_analysis": "基本面分析",
-    "sector_position": "板块行业分析",
-    "company_highlights": "公司亮点/风险",
-    "news_summary": "新闻摘要",
-    "market_sentiment": "市场情绪",
-    "hot_topics": "相关热点"
-}}
-```
+- `stock_name`, `sentiment_score`, `trend_prediction`, `operation_advice`, `decision_type`, `confidence_level`
+- `dashboard`: 含 `core_conclusion`（one_sentence, signal_type, time_sensitivity, position_advice）、`data_perspective`（trend_status, price_position, volume_analysis, chip_structure）、`intelligence`（latest_news, risk_alerts, positive_catalysts, earnings_outlook, sentiment_summary）、`battle_plan`（sniper_points, position_strategy, action_checklist）
+- `analysis_summary`, `key_points`, `risk_warning`, `buy_reason`
+- `trend_analysis`, `technical_analysis`, `ma_analysis`, `volume_analysis`, `pattern_analysis`
+- `fundamental_analysis`, `sector_position`, `company_highlights`, `news_summary`, `market_sentiment`, `hot_topics`
 
-## 评分标准
-
-### 强烈买入（80-100分）：
-- ✅ 多头排列：MA5 > MA10 > MA20
-- ✅ 低乖离率：<2%，最佳买点
-- ✅ 缩量回调或放量突破
-- ✅ 筹码集中健康
-- ✅ 消息面有利好催化
-
-### 买入（60-79分）：
-- ✅ 多头排列或弱势多头
-- ✅ 乖离率 <5%
-- ✅ 量能正常
-- ⚪ 允许一项次要条件不满足
-
-### 观望（40-59分）：
-- ⚠️ 乖离率 >5%（追高风险）
-- ⚠️ 均线缠绕趋势不明
-- ⚠️ 有风险事件
-
-### 卖出/减仓（0-39分）：
-- ❌ 空头排列
-- ❌ 跌破MA20
-- ❌ 放量下跌
-- ❌ 重大利空
+评分标准由激活的 `skill_policy` 定义（如有）。
 
 ## 决策仪表盘核心原则
 
@@ -214,89 +139,17 @@ AGENT_SYSTEM_PROMPT = """你是一位{market_role}投资分析 Agent，拥有数
 
 {skills_section}
 
-## 输出格式：决策仪表盘 JSON
+## 输出格式
 
-你的最终响应必须是以下结构的有效 JSON 对象：
+最终响应必须是有效的 JSON 对象，必须包含以下顶层字段：
 
-```json
-{{
-    "stock_name": "股票中文名称",
-    "sentiment_score": 0-100整数,
-    "trend_prediction": "强烈看多/看多/震荡/看空/强烈看空",
-    "operation_advice": "买入/加仓/持有/减仓/卖出/观望",
-    "decision_type": "buy/hold/sell",
-    "confidence_level": "高/中/低",
-    "dashboard": {{
-        "core_conclusion": {{
-            "one_sentence": "一句话核心结论（30字以内）",
-            "signal_type": "🟢买入信号/🟡持有观望/🔴卖出信号/⚠️风险警告",
-            "time_sensitivity": "立即行动/今日内/本周内/不急",
-            "position_advice": {{
-                "no_position": "空仓者建议",
-                "has_position": "持仓者建议"
-            }}
-        }},
-        "data_perspective": {{
-            "trend_status": {{"ma_alignment": "", "is_bullish": true, "trend_score": 0}},
-            "price_position": {{"current_price": 0, "ma5": 0, "ma10": 0, "ma20": 0, "bias_ma5": 0, "bias_status": "", "support_level": 0, "resistance_level": 0}},
-            "volume_analysis": {{"volume_ratio": 0, "volume_status": "", "turnover_rate": 0, "volume_meaning": ""}},
-            "chip_structure": {{"profit_ratio": 0, "avg_cost": 0, "concentration": 0, "chip_health": ""}}
-        }},
-        "intelligence": {{
-            "latest_news": "",
-            "risk_alerts": [],
-            "positive_catalysts": [],
-            "earnings_outlook": "",
-            "sentiment_summary": ""
-        }},
-        "battle_plan": {{
-            "sniper_points": {{"ideal_buy": "", "secondary_buy": "", "stop_loss": "", "take_profit": ""}},
-            "position_strategy": {{"suggested_position": "", "entry_plan": "", "risk_control": ""}},
-            "action_checklist": []
-        }}
-    }},
-    "analysis_summary": "100字综合分析摘要",
-    "key_points": "3-5个核心看点，逗号分隔",
-    "risk_warning": "风险提示",
-    "buy_reason": "操作理由，引用激活技能或风险框架",
-    "trend_analysis": "走势形态分析",
-    "short_term_outlook": "短期1-3日展望",
-    "medium_term_outlook": "中期1-2周展望",
-    "technical_analysis": "技术面综合分析",
-    "ma_analysis": "均线系统分析",
-    "volume_analysis": "量能分析",
-    "pattern_analysis": "K线形态分析",
-    "fundamental_analysis": "基本面分析",
-    "sector_position": "板块行业分析",
-    "company_highlights": "公司亮点/风险",
-    "news_summary": "新闻摘要",
-    "market_sentiment": "市场情绪",
-    "hot_topics": "相关热点"
-}}
-```
+- `stock_name`, `sentiment_score`, `trend_prediction`, `operation_advice`, `decision_type`, `confidence_level`
+- `dashboard`: 含 `core_conclusion`（one_sentence, signal_type, time_sensitivity, position_advice）、`data_perspective`（trend_status, price_position, volume_analysis, chip_structure）、`intelligence`（latest_news, risk_alerts, positive_catalysts, earnings_outlook, sentiment_summary）、`battle_plan`（sniper_points, position_strategy, action_checklist）
+- `analysis_summary`, `key_points`, `risk_warning`, `buy_reason`
+- `trend_analysis`, `technical_analysis`, `ma_analysis`, `volume_analysis`, `pattern_analysis`
+- `fundamental_analysis`, `sector_position`, `company_highlights`, `news_summary`, `market_sentiment`, `hot_topics`
 
-## 评分标准
-
-### 强烈买入（80-100分）：
-- ✅ 多个激活技能同时支持积极结论
-- ✅ 上行空间、触发条件与风险回报清晰
-- ✅ 关键风险已排查，仓位与止损计划明确
-- ✅ 重要数据和情报结论彼此一致
-
-### 买入（60-79分）：
-- ✅ 主信号偏积极，但仍有少量待确认项
-- ✅ 允许存在可控风险或次优入场点
-- ✅ 需要在报告中明确补充观察条件
-
-### 观望（40-59分）：
-- ⚠️ 信号分歧较大，或缺乏足够确认
-- ⚠️ 风险与机会大致均衡
-- ⚠️ 更适合等待触发条件或回避不确定性
-
-### 卖出/减仓（0-39分）：
-- ❌ 主要结论转弱，风险明显高于收益
-- ❌ 触发了止损/失效条件或重大利空
-- ❌ 现有仓位更需要保护而不是进攻
+评分标准由激活的 `skill_policy` 定义（如有）。
 
 ## 决策仪表盘核心原则
 

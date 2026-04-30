@@ -605,6 +605,47 @@ class StockAnalysisPipeline:
                 'risk_factors': trend_result.risk_factors,
             }
 
+        # --- SEPA 专用字段注入 ---
+        code = context.get('code', '')
+        today = enhanced.get('today', {})
+        if code:
+            # 1. MA50/150/200 从 today 读取（已预计算落表）
+            sepa = {
+                'ma50': today.get('ma50'),
+                'ma150': today.get('ma150'),
+                'ma200': today.get('ma200'),
+            }
+            # 2. 52周高低点、RS、涨停统计（调用已有工具 handler，失败不阻断）
+            try:
+                from src.agent.tools.data_tools import _handle_get_52w_range, _handle_get_relative_strength
+                from src.agent.tools.analysis_tools import _handle_get_limit_up_down_stats
+                w52 = _handle_get_52w_range(code)
+                if w52.get('status') == 'ok':
+                    sepa['high_52w'] = w52.get('high_52w')
+                    sepa['low_52w'] = w52.get('low_52w')
+                    sepa['pct_from_52w_high'] = w52.get('pct_from_52w_high')
+                    sepa['pct_from_52w_low'] = w52.get('pct_from_52w_low')
+                    sepa['within_25pct_of_high'] = w52.get('within_25pct_of_high')
+                    sepa['above_130pct_of_low'] = w52.get('above_130pct_of_low')
+                rs = _handle_get_relative_strength(code)
+                if rs.get('status') == 'ok':
+                    sepa['rs_stock_return_1y'] = rs.get('stock_return_1y_pct')
+                    sepa['rs_index_return_1y'] = rs.get('index_return_1y_pct')
+                    sepa['rs_ratio'] = rs.get('rs_ratio')
+                    sepa['rs_rank_pct'] = rs.get('rs_rank_pct')
+                    sepa['pass_sepa_rs_70'] = rs.get('pass_sepa_rs_70')
+                limit_stats = _handle_get_limit_up_down_stats(code, days=60)
+                if limit_stats.get('status') == 'ok':
+                    sepa['limit_up_count'] = limit_stats.get('limit_up_count')
+                    sepa['limit_down_count'] = limit_stats.get('limit_down_count')
+                    sepa['failed_limit_up_count'] = limit_stats.get('failed_limit_up_count')
+                    sepa['max_consecutive_limit_up'] = limit_stats.get('max_consecutive_limit_up')
+                    sepa['momentum_grade'] = limit_stats.get('momentum_grade')
+                    sepa['grade_meaning'] = limit_stats.get('grade_meaning')
+            except Exception as exc:
+                logger.warning("[%s] SEPA field injection failed: %s", code, exc)
+            enhanced['sepa_analysis'] = sepa
+
         # Issue #234: Override today with realtime OHLC + trend MA for intraday analysis
         # Guard: trend_result.ma5 > 0 ensures MA calculation succeeded (data sufficient)
         if realtime_quote and trend_result and trend_result.ma5 > 0:
@@ -738,7 +779,7 @@ class StockAnalysisPipeline:
         enriched_context["belong_boards"] = boards
         return enriched_context
 
-    def _ensure_agent_history(self, code: str, min_days: int = 240) -> None:
+    def _ensure_agent_history(self, code: str, min_days: int = 300) -> None:
         """Ensure at least *min_days* of K-line history is in DB for agent tools."""
         from src.services.history_loader import get_frozen_target_date
 

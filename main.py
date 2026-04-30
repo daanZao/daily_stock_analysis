@@ -774,8 +774,10 @@ def main() -> int:
         args.serve_only = True
 
     # 兼容旧版 WEBUI_ENABLED 环境变量
+    # WEBUI_ENABLED 自动启用时只启动服务，不自动执行分析；
+    # 如需同时分析，请显式使用 --serve 或 --webui
     if config.webui_enabled and not (args.serve or args.serve_only):
-        args.serve = True
+        args.serve_only = True
 
     # === 启动 Web 服务 (如果启用) ===
     start_serve = (args.serve or args.serve_only) and os.getenv("GITHUB_ACTIONS") != "true"

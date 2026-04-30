@@ -77,7 +77,7 @@
 | `turnover` | 换手率 | 实时行情增强 |
 | `volume_ratio` | 量比 | 实时行情增强 |
 | `pe` / `pb` | 市盈率/市净率 | 实时行情增强 |
-| `ma5/10/20/60` | 移动平均线 | 基于2年历史预计算 |
+| `ma5/10/20/50/60/150/200` | 移动平均线 | 基于2年历史预计算 |
 | `macd_dif/dea/bar/signal` | MACD(12,26,9) | 基于2年历史预计算 |
 | `rsi_6/12/24/signal` | RSI(Wilder) | 基于2年历史预计算 |
 | `kdj_k/d/j/signal` | KDJ(9,3,3) | 基于2年历史预计算 |
@@ -440,7 +440,7 @@ CREATE TABLE stock_daily (
     open FLOAT, high FLOAT, low FLOAT, close FLOAT,
     volume BIGINT, amount FLOAT, pct_chg FLOAT,
     -- 移动平均线
-    ma5 FLOAT, ma10 FLOAT, ma20 FLOAT, ma60 FLOAT,
+    ma5 FLOAT, ma10 FLOAT, ma20 FLOAT, ma50 FLOAT, ma60 FLOAT, ma150 FLOAT, ma200 FLOAT,
     volume_ratio FLOAT,
     -- MACD(12,26,9)
     macd_dif FLOAT, macd_dea FLOAT, macd_bar FLOAT, macd_signal VARCHAR(8),

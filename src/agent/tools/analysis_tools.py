@@ -113,7 +113,7 @@ def _handle_calculate_ma(stock_code: str, periods: Optional[str] = None, days: i
         return {"error": f"No historical data for {stock_code}"}
 
     # Parse requested periods (default: 5,10,20,30,60,120,250)
-    default_periods = [5, 10, 20, 30, 60, 120, 250]
+    default_periods = [5, 10, 20, 50, 60, 150, 200]
     if periods:
         try:
             requested = [int(p.strip()) for p in periods.split(",") if p.strip().isdigit()]
@@ -160,9 +160,10 @@ def _handle_calculate_ma(stock_code: str, periods: Optional[str] = None, days: i
 
 calculate_ma_tool = ToolDefinition(
     name="calculate_ma",
-    description="Calculate moving averages (MA5/10/20/30/60/120/250 or custom periods) "
+    description="Calculate moving averages (MA5/10/20/50/60/150/200 or custom periods) "
                 "for a stock. Returns each MA value, price bias %, and whether price "
-                "is above each MA. Also returns overall MA alignment (多头/空头/混合).",
+                "is above each MA. Also returns overall MA alignment (多头/空头/混合). "
+                "SEPA Trend Template requires 50/150/200 MAs.",
     parameters=[
         ToolParameter(
             name="stock_code",
@@ -172,10 +173,10 @@ calculate_ma_tool = ToolDefinition(
         ToolParameter(
             name="periods",
             type="string",
-            description="Comma-separated MA periods to calculate (default: '5,10,20,30,60,120,250'). "
+            description="Comma-separated MA periods to calculate (default: '5,10,20,50,60,150,200'). "
                         "E.g., '5,10,20,60'",
             required=False,
-            default="5,10,20,30,60,120,250",
+            default="5,10,20,50,60,150,200",
         ),
         ToolParameter(
             name="days",
@@ -512,9 +513,146 @@ analyze_pattern_tool = ToolDefinition(
 )
 
 
+# ============================================================
+# get_limit_up_down_stats — 60-day limit-up / limit-down stats
+# ============================================================
+
+def _detect_limit_pct(stock_code: str, stock_name: str = "") -> float:
+    """Return daily price limit percentage for a stock (0.20, 0.10, or 0.05)."""
+    c = str(stock_code or "").strip().split(".")[0]
+    name = str(stock_name or "").upper()
+    if "ST" in name:
+        return 0.05
+    if len(c) == 6 and c.isdigit():
+        if c.startswith("688") or c.startswith("30"):
+            return 0.20
+    return 0.10
+
+
+def _handle_get_limit_up_down_stats(stock_code: str, days: int = 60) -> dict:
+    """Count limit-up, limit-down, failed limit-up, and consecutive limit-ups."""
+    from src.services.history_loader import load_history_df
+    import pandas as pd
+
+    df, source = load_history_df(stock_code, days=max(days + 10, 80))
+    if df is None or df.empty:
+        return {"error": f"No historical data for {stock_code}"}
+
+    df = df.tail(days).copy().reset_index(drop=True)
+    if len(df) < 10:
+        return {"error": f"Insufficient data for limit-up stats (got {len(df)} days, need >= 10)"}
+
+    limit_pct = _detect_limit_pct(stock_code)
+    limit_pct_display = limit_pct * 100
+
+    # Ensure required columns exist
+    required = {"open", "high", "low", "close"}
+    if not required.issubset(df.columns):
+        return {"error": f"Missing required columns: {required - set(df.columns)}"}
+
+    # Derive pre_close from close and pct_chg when available
+    if "pct_chg" in df.columns:
+        pre_close = df["close"] / (1 + df["pct_chg"] / 100.0)
+    else:
+        pre_close = df["close"].shift(1)
+        pre_close.iloc[0] = df["open"].iloc[0]  # best-effort for first row
+
+    limit_up_price = pre_close * (1 + limit_pct)
+    limit_down_price = pre_close * (1 - limit_pct)
+
+    # Tolerance for rounding/market rules
+    tol = 0.005  # 0.5% tolerance
+
+    is_limit_up = df["close"] >= limit_up_price * (1 - tol)
+    is_limit_down = df["close"] <= limit_down_price * (1 + tol)
+    # Failed limit-up: high touched limit-up zone but close did not seal it
+    is_failed_limit_up = (df["high"] >= limit_up_price * (1 - tol)) & (~is_limit_up)
+
+    limit_up_count = int(is_limit_up.sum())
+    limit_down_count = int(is_limit_down.sum())
+    failed_limit_up_count = int(is_failed_limit_up.sum())
+
+    # Max consecutive limit-up days
+    max_consecutive = 0
+    current = 0
+    for flag in is_limit_up:
+        if flag:
+            current += 1
+            max_consecutive = max(max_consecutive, current)
+        else:
+            current = 0
+
+    # Grade based on SEPA momentum criteria
+    ratio = limit_up_count / max(limit_down_count, 1)
+    if limit_down_count == 0:
+        ratio = float(limit_up_count) if limit_up_count > 0 else 0.0
+
+    if 3 <= limit_up_count <= 8 and limit_down_count == 0 and failed_limit_up_count < limit_up_count * 0.3:
+        grade = "S"
+    elif 8 <= limit_up_count <= 15 and limit_down_count <= 1 and ratio >= 5:
+        grade = "A"
+    elif 15 <= limit_up_count <= 25 and limit_down_count <= 2 and ratio >= 3:
+        grade = "B"
+    elif limit_up_count > 25 or limit_down_count >= 3 or ratio < 3:
+        grade = "C"
+    else:
+        grade = "F" if limit_down_count >= 2 else "B"
+
+    # If any limit-down without limit-up offset -> F
+    if limit_down_count >= 2 and limit_up_count < limit_down_count * 3:
+        grade = "F"
+
+    return {
+        "stock_code": stock_code,
+        "status": "ok",
+        "source": source,
+        "period_days": len(df),
+        "limit_pct": limit_pct_display,
+        "limit_up_count": limit_up_count,
+        "limit_down_count": limit_down_count,
+        "failed_limit_up_count": failed_limit_up_count,
+        "max_consecutive_limit_up": max_consecutive,
+        "limit_up_down_ratio": round(ratio, 1),
+        "momentum_grade": grade,
+        "grade_meaning": {
+            "S": "健康动量，机构+游资共振",
+            "A": "强动量，需结合VCP确认",
+            "B": "高动量但过热，轻仓试探",
+            "C": "妖股/庄股特征，一票否决",
+            "F": "弱势/暴雷，一票否决",
+        }.get(grade, ""),
+    }
+
+
+get_limit_up_down_stats_tool = ToolDefinition(
+    name="get_limit_up_down_stats",
+    description="Count limit-up, limit-down, failed limit-up (炸板), and max consecutive limit-up days "
+                "over the last N trading days. Automatically detects price limit rules: "
+                "STAR Market / ChiNext (20%), ST stocks (5%), normal A-shares (10%). "
+                "Returns momentum grade (S/A/B/C/F) aligned with SEPA criteria.",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="Stock code, e.g., '600519'",
+        ),
+        ToolParameter(
+            name="days",
+            type="integer",
+            description="Number of recent trading days to scan (default: 60)",
+            required=False,
+            default=60,
+        ),
+    ],
+    handler=_handle_get_limit_up_down_stats,
+    category="analysis",
+)
+
+
 ALL_ANALYSIS_TOOLS = [
     analyze_trend_tool,
     calculate_ma_tool,
     get_volume_analysis_tool,
     analyze_pattern_tool,
+    get_limit_up_down_stats_tool,
 ]

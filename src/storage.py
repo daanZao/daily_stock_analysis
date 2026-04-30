@@ -145,7 +145,10 @@ class StockDaily(Base):
     ma5 = Column(Float)
     ma10 = Column(Float)
     ma20 = Column(Float)
+    ma50 = Column(Float)
     ma60 = Column(Float)
+    ma150 = Column(Float)
+    ma200 = Column(Float)
     volume_ratio = Column(Float)  # 量比
 
     # MACD 指标
@@ -210,7 +213,10 @@ class StockDaily(Base):
             'ma5': self.ma5,
             'ma10': self.ma10,
             'ma20': self.ma20,
+            'ma50': self.ma50,
             'ma60': self.ma60,
+            'ma150': self.ma150,
+            'ma200': self.ma200,
             'volume_ratio': self.volume_ratio,
             'macd_dif': self.macd_dif,
             'macd_dea': self.macd_dea,
@@ -315,6 +321,7 @@ class FinancialReport(Base):
     roe = Column(Float)
     roe_diluted = Column(Float)
     eps = Column(Float)
+    net_profit_deducted = Column(Float)  # 扣除非经常性损益后的净利润
 
     # 元数据
     announced_date = Column(Date)
@@ -345,6 +352,7 @@ class FinancialReport(Base):
             'roe': self.roe,
             'roe_diluted': self.roe_diluted,
             'eps': self.eps,
+            'net_profit_deducted': self.net_profit_deducted,
             'announced_date': self.announced_date.isoformat() if self.announced_date else None,
             'data_source': self.data_source,
         }
@@ -2153,7 +2161,7 @@ class DatabaseManager:
         _INDICATOR_COLS = [
             'open', 'high', 'low', 'close',
             'volume', 'amount', 'pct_chg',
-            'ma5', 'ma10', 'ma20', 'ma60', 'volume_ratio',
+            'ma5', 'ma10', 'ma20', 'ma50', 'ma60', 'ma150', 'ma200', 'volume_ratio',
             'macd_dif', 'macd_dea', 'macd_bar', 'macd_signal',
             'rsi_6', 'rsi_12', 'rsi_24', 'rsi_signal',
             'kdj_k', 'kdj_d', 'kdj_j', 'kdj_signal',
@@ -2219,7 +2227,10 @@ class DatabaseManager:
                         'ma5': excluded.ma5,
                         'ma10': excluded.ma10,
                         'ma20': excluded.ma20,
+                        'ma50': excluded.ma50,
                         'ma60': excluded.ma60,
+                        'ma150': excluded.ma150,
+                        'ma200': excluded.ma200,
                         'volume_ratio': excluded.volume_ratio,
                         'macd_dif': excluded.macd_dif,
                         'macd_dea': excluded.macd_dea,
@@ -2479,6 +2490,7 @@ class DatabaseManager:
         roe: Optional[float] = None,
         roe_diluted: Optional[float] = None,
         eps: Optional[float] = None,
+        net_profit_deducted: Optional[float] = None,
         announced_date: Optional[date] = None,
         data_source: str = "Unknown",
     ) -> bool:
@@ -2511,6 +2523,7 @@ class DatabaseManager:
                     roe=roe,
                     roe_diluted=roe_diluted,
                     eps=eps,
+                    net_profit_deducted=net_profit_deducted,
                     announced_date=announced_date,
                     data_source=data_source,
                     created_at=now,
@@ -2541,6 +2554,8 @@ class DatabaseManager:
                     existing.roe_diluted = roe_diluted
                 if eps is not None:
                     existing.eps = eps
+                if net_profit_deducted is not None:
+                    existing.net_profit_deducted = net_profit_deducted
                 if announced_date is not None:
                     existing.announced_date = announced_date
                 existing.data_source = data_source
@@ -2553,6 +2568,27 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"保存 {code} 财报表失败: {e}")
             return False
+
+    def get_minutely_data(
+        self,
+        code: str,
+        days: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """获取最近 N 个交易日的 60 分钟 K 线数据（按日期+时间升序）。"""
+        from datetime import timedelta
+        end = date.today()
+        start = end - timedelta(days=days * 2 + 5)
+        with self.get_session() as session:
+            rows = session.execute(
+                select(StockMinutely)
+                .where(
+                    StockMinutely.code == code,
+                    StockMinutely.date >= start,
+                    StockMinutely.date <= end,
+                )
+                .order_by(StockMinutely.date, StockMinutely.time)
+            ).scalars().all()
+            return [r.to_dict() for r in rows]
 
     def get_financial_reports(
         self,

@@ -434,7 +434,7 @@ class BaseFetcher(ABC):
         MACD/EMA 收敛到与市场软件一致的水平。
 
         计算指标：
-        - MA5, MA10, MA20, MA60: 移动平均线
+        - MA5, MA10, MA20, MA50, MA60, MA150, MA200: 移动平均线
         - MACD: EMA(12/26/9)  DIF = EMA12 - EMA26, DEA = EMA(DIF,9), BAR = (DIF-DEA)*2
         - RSI: Wilder's smoothing (alpha=1/N), 6/12/24
         - KDJ: RSV(9) -> K(3) -> D(3) -> J = 3K - 2D
@@ -457,7 +457,10 @@ class BaseFetcher(ABC):
         df['ma5'] = close.rolling(window=5, min_periods=5).mean()
         df['ma10'] = close.rolling(window=10, min_periods=10).mean()
         df['ma20'] = close.rolling(window=20, min_periods=20).mean()
+        df['ma50'] = close.rolling(window=50, min_periods=50).mean()
         df['ma60'] = close.rolling(window=60, min_periods=60).mean()
+        df['ma150'] = close.rolling(window=150, min_periods=150).mean()
+        df['ma200'] = close.rolling(window=200, min_periods=200).mean()
 
         # === 量比：当日成交量 / 前5日均量(shift 1) ===
         avg_volume_5 = volume.rolling(window=5, min_periods=5).mean()

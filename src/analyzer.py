@@ -1561,6 +1561,30 @@ class GeminiAnalyzer:
                     f"{row.get('bias_ma5', '-')}% | {row.get('candle_pattern') or '-'} |\n"
                 )
 
+        # --- SEPA 趋势模板数据注入 ---
+        sepa = context.get('sepa_analysis', {}) if isinstance(context, dict) else {}
+        if sepa:
+            prompt += f"""
+### 趋势模板数据（SEPA）
+| 指标 | 数值 | 状态 |
+|------|------|------|
+| MA50 | {sepa.get('ma50', 'N/A')} | {"价格在上方" if sepa.get('ma50') and today.get('close') and today.get('close') > sepa.get('ma50') else "价格在下方/无数据"} |
+| MA150 | {sepa.get('ma150', 'N/A')} | {"价格在上方" if sepa.get('ma150') and today.get('close') and today.get('close') > sepa.get('ma150') else "价格在下方/无数据"} |
+| MA200 | {sepa.get('ma200', 'N/A')} | {"价格在上方" if sepa.get('ma200') and today.get('close') and today.get('close') > sepa.get('ma200') else "价格在下方/无数据"} |
+| 52周高点 | {sepa.get('high_52w', 'N/A')} | 距高点 {sepa.get('pct_from_52w_high', 'N/A')}% |
+| 52周低点 | {sepa.get('low_52w', 'N/A')} | 距低点 {sepa.get('pct_from_52w_low', 'N/A')}% |
+| RS相对强度 | {sepa.get('rs_rank_pct', 'N/A')} | {"通过(RS>=70)" if sepa.get('pass_sepa_rs_70') else "未通过/无数据"} |
+
+### 动量验证（60日）
+| 指标 | 数值 |
+|------|------|
+| 涨停次数 | {sepa.get('limit_up_count', 'N/A')} 次 |
+| 跌停次数 | {sepa.get('limit_down_count', 'N/A')} 次 |
+| 炸板次数 | {sepa.get('failed_limit_up_count', 'N/A')} 次 |
+| 最大连板天数 | {sepa.get('max_consecutive_limit_up', 'N/A')} 天 |
+| 动量等级 | {sepa.get('momentum_grade', 'N/A')} ({sepa.get('grade_meaning', '')}) |
+"""
+
         # 添加实时行情数据（量比、换手率等）
         if 'realtime' in context:
             rt = context['realtime']

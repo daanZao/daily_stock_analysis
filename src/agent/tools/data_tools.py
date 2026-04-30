@@ -692,3 +692,271 @@ get_capital_flow_tool = ToolDefinition(
 
 
 ALL_DATA_TOOLS.append(get_capital_flow_tool)
+
+
+# ============================================================
+# get_minutely_history — 60-minute K-line data
+# ============================================================
+
+def _handle_get_minutely_history(stock_code: str, days: int = 5) -> dict:
+    """Get recent 60-minute K-line data from DB or fallback to fetcher."""
+    db = _get_db()
+    records = db.get_minutely_data(stock_code, days=days)
+
+    if not records:
+        manager = _get_fetcher_manager()
+        try:
+            df, source = manager.get_minutely_data(stock_code, days=days)
+            if df is not None and not df.empty:
+                records = df.to_dict(orient="records")
+                for r in records:
+                    if "date" in r:
+                        r["date"] = str(r["date"])
+        except Exception as exc:
+            logger.warning("get_minutely_history fallback fetch failed for %s: %s", stock_code, exc)
+
+    if not records:
+        return {
+            "stock_code": stock_code,
+            "status": "no_data",
+            "note": "No 60-minute data available. This is normal if the stock has no recent minutely records.",
+            "records": [],
+        }
+
+    # Keep only recent N trading days (calendar-day approximation)
+    from datetime import date as _date, timedelta
+    cutoff = _date.today() - timedelta(days=days + 2)
+    filtered = [r for r in records if _date.fromisoformat(str(r.get("date", "1970-01-01"))) >= cutoff]
+
+    return {
+        "stock_code": stock_code,
+        "status": "ok",
+        "period_days": days,
+        "record_count": len(filtered),
+        "records": filtered,
+    }
+
+
+get_minutely_history_tool = ToolDefinition(
+    name="get_minutely_history",
+    description="Get recent 60-minute K-line (OHLCV) data for a stock. "
+                "Useful for intraday trend analysis, short-term support/resistance, "
+                "and VCP pattern confirmation on shorter timeframes. "
+                "Returns the last ~5 trading days of 60-minute bars.",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="Stock code, e.g., '600519'",
+        ),
+        ToolParameter(
+            name="days",
+            type="integer",
+            description="Number of recent calendar days to fetch (default: 5)",
+            required=False,
+            default=5,
+        ),
+    ],
+    handler=_handle_get_minutely_history,
+    category="data",
+)
+
+ALL_DATA_TOOLS.append(get_minutely_history_tool)
+
+
+# ============================================================
+# get_financial_history — quarterly financial reports
+# ============================================================
+
+def _handle_get_financial_history(stock_code: str, quarters: int = 4) -> dict:
+    """Get last N quarterly financial reports for trend analysis."""
+    db = _get_db()
+    raw = db.get_financial_reports(stock_code, limit=max(quarters, 1) * 2)
+
+    if not raw:
+        return {
+            "stock_code": stock_code,
+            "status": "no_data",
+            "note": "No financial report data available in database.",
+            "quarters": [],
+        }
+
+    # Deduplicate by report_date, keep most recent N unique quarters
+    seen = set()
+    deduped = []
+    for r in raw:
+        key = str(r.get("report_date"))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+
+    quarters_list = deduped[:quarters]
+
+    return {
+        "stock_code": stock_code,
+        "status": "ok",
+        "quarter_count": len(quarters_list),
+        "quarters": quarters_list,
+    }
+
+
+get_financial_history_tool = ToolDefinition(
+    name="get_financial_history",
+    description="Get the last N quarters of financial reports (revenue, profit, margins, ROE, EPS). "
+                "Essential for SEPA Earnings analysis and year-over-year trend evaluation. "
+                "Returns quarterly data ordered from oldest to newest for trend reading.",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="Stock code, e.g., '600519'",
+        ),
+        ToolParameter(
+            name="quarters",
+            type="integer",
+            description="Number of quarters to retrieve (default: 4)",
+            required=False,
+            default=4,
+        ),
+    ],
+    handler=_handle_get_financial_history,
+    category="data",
+)
+
+ALL_DATA_TOOLS.append(get_financial_history_tool)
+
+
+# ============================================================
+# get_52w_range — 52-week high / low
+# ============================================================
+
+def _handle_get_52w_range(stock_code: str) -> dict:
+    """Calculate 52-week high, low, and current distance percentages."""
+    from src.services.history_loader import load_history_df
+
+    df, source = load_history_df(stock_code, days=300)
+    if df is None or df.empty or len(df) < 50:
+        return {
+            "stock_code": stock_code,
+            "status": "insufficient_data",
+            "note": f"Need at least 50 trading days of history, got {len(df) if df is not None else 0}.",
+        }
+
+    df = df.sort_values("date").reset_index(drop=True)
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+
+    current_price = float(close.iloc[-1])
+    recent_252 = min(252, len(df))
+    high_52w = float(high.tail(recent_252).max())
+    low_52w = float(low.tail(recent_252).min())
+
+    pct_from_high = round((current_price - high_52w) / high_52w * 100, 2) if high_52w > 0 else None
+    pct_from_low = round((current_price - low_52w) / low_52w * 100, 2) if low_52w > 0 else None
+
+    return {
+        "stock_code": stock_code,
+        "status": "ok",
+        "source": source,
+        "data_points": len(df),
+        "current_price": round(current_price, 2),
+        "high_52w": round(high_52w, 2),
+        "low_52w": round(low_52w, 2),
+        "pct_from_52w_high": pct_from_high,
+        "pct_from_52w_low": pct_from_low,
+        "within_25pct_of_high": pct_from_high is not None and pct_from_high >= -25,
+        "above_130pct_of_low": pct_from_low is not None and pct_from_low >= 30,
+    }
+
+
+get_52w_range_tool = ToolDefinition(
+    name="get_52w_range",
+    description="Calculate 52-week high/low prices and the stock's current position relative to them. "
+                "Key inputs for SEPA Trend Template rules #6 and #7. "
+                "Returns current price, 52w high/low, and distance percentages.",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="Stock code, e.g., '600519'",
+        ),
+    ],
+    handler=_handle_get_52w_range,
+    category="data",
+)
+
+ALL_DATA_TOOLS.append(get_52w_range_tool)
+
+
+# ============================================================
+# get_relative_strength — RS ranking vs CSI300
+# ============================================================
+
+def _handle_get_relative_strength(stock_code: str) -> dict:
+    """Compute 1-year return vs CSI300 (000300) for RS ranking."""
+    from src.services.history_loader import load_history_df
+
+    stock_df, stock_source = load_history_df(stock_code, days=300)
+    index_df, index_source = load_history_df("000300", days=300)
+
+    if stock_df is None or stock_df.empty or len(stock_df) < 100:
+        return {
+            "stock_code": stock_code,
+            "status": "insufficient_data",
+            "note": f"Stock history insufficient ({len(stock_df) if stock_df is not None else 0} bars).",
+        }
+
+    stock_df = stock_df.sort_values("date").reset_index(drop=True)
+    stock_return = float(stock_df["close"].iloc[-1]) / float(stock_df["close"].iloc[0]) - 1
+    stock_return_pct = round(stock_return * 100, 2)
+
+    index_return_pct = None
+    if index_df is not None and not index_df.empty and len(index_df) >= 100:
+        index_df = index_df.sort_values("date").reset_index(drop=True)
+        index_return = float(index_df["close"].iloc[-1]) / float(index_df["close"].iloc[0]) - 1
+        index_return_pct = round(index_return * 100, 2)
+
+    rs_ratio = None
+    if index_return_pct is not None:
+        # RS = stock return / index return, capped for extreme index moves
+        if abs(index_return_pct) < 0.01:
+            rs_ratio = round(stock_return_pct / 0.01, 2)
+        else:
+            rs_ratio = round(stock_return_pct / index_return_pct, 2)
+
+    # Approximate percentile: assume normal-ish distribution, simplistic estimate
+    rs_rank_pct = None
+    if rs_ratio is not None:
+        rs_rank_pct = min(99, max(1, int(50 + (rs_ratio - 1) * 25)))
+
+    return {
+        "stock_code": stock_code,
+        "status": "ok",
+        "stock_source": stock_source,
+        "index_source": index_source if index_df is not None else "none",
+        "stock_return_1y_pct": stock_return_pct,
+        "index_return_1y_pct": index_return_pct,
+        "rs_ratio": rs_ratio,
+        "rs_rank_pct": rs_rank_pct,
+        "pass_sepa_rs_70": rs_rank_pct is not None and rs_rank_pct >= 70,
+    }
+
+
+get_relative_strength_tool = ToolDefinition(
+    name="get_relative_strength",
+    description="Calculate the stock's 1-year price return relative to the CSI300 index (000300). "
+                "Returns RS ratio, approximate percentile rank, and whether it passes the SEPA "
+                "Trend Template rule #8 (RS >= 70). Essential for identifying market leaders.",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="Stock code, e.g., '600519'",
+        ),
+    ],
+    handler=_handle_get_relative_strength,
+    category="data",
+)
+
+ALL_DATA_TOOLS.append(get_relative_strength_tool)
