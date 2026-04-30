@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 新增 MARKET_DATA_SYNC_ENABLED 环境变量开关（默认 true），控制收盘市场数据同步行为
 - [改进] MarketDataSync 默认使用 get_effective_trading_date("cn") 对齐最近交易日，避免节假日/跨日边界的数据日期错位
 - [文档] 新增 docs/DATA_PIPELINE.md，阐述项目 A 股数据抓取、持久化、多源对齐与消费的全景链路
+- [新功能] StockDaily 扩表：新增 MA60、MACD(12/26/9)、RSI(6/12/24 Wilder)、KDJ(9/3/3)、乖离率(MA5/10/20)、布林带(20,2)、单K线形态等 23 个预计算指标字段
+- [新功能] 新增 stock_minutely 表：存储 Baostock 60分钟K线数据（个股），支持日内短周期分析
+- [新功能] 新增 stock_basic_info 表：存储个股/指数基础 metadata（名称、行业、上市日期、股本等）
+- [新功能] 新增 financial_report 表：存储季度结构化财报（营收、净利、毛利率、ROE、EPS 等）
+- [新功能] 新增 earnings_forecast 表：存储 baostock 业绩预告（预增/预减/扭亏/预亏及净利润变动区间）
+- [新功能] BaostockFetcher 新增 get_minutely_data（60分钟K线）、get_growth_data（季频成长能力）、get_forecast_report（季频业绩预告）接口
+- [新功能] DataFetcherManager 新增 get_minutely_data 路由方法
+- [新功能] DatabaseManager 新增 save_minutely_data、save_stock_basic_info、save_financial_report、save_earnings_forecast、get_latest_indicators 等方法
+- [改进] _calculate_indicators 重写：基于完整2年日线历史计算，min_periods 严格等于窗口大小，MACD 使用标准 EMA 递推，RSI 改用 Wilder's smoothing（ewm alpha=1/N），确保与看盘软件收敛一致
+- [改进] analyzer.py _format_prompt 注入完整技术指标表格（MACD/RSI/KDJ/BOLL/乖离率/K线形态）、5日指标趋势、成长能力、资金流向、季度财报、业绩预告
+- [改进] get_analysis_context 增强：返回最近5日技术指标趋势、最近4个季度财报、最新业绩预告
+- [文档] docs/DATA_PIPELINE.md 更新：补充 60分钟K线/基本信息/财报/业绩预告表结构、数据源能力矩阵、技术指标预计算策略说明
+- [修复] 修复 src/analyzer.py 中智能引号被误用作 Python 字符串定界符导致的 SyntaxError
+- [修复] 修复 FinancialReport/EarningsForecast 重复索引定义（Column(index=True) 与显式 Index 同名）导致 SQLite create_all 报错的问题
 
 ## [3.14.1] - 2026-04-26
 

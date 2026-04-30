@@ -36,15 +36,17 @@
 │   ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────────┐   │
 │   │ DataFetcherManager│    │ DataFetcherManager│    │ DataFetcherManager  │   │
 │   │ get_daily_data()  │    │ get_main_indices()│    │ get_market_stats()  │   │
-│   │ get_stock_name()  │    │ get_sector_rankings│   │ get_sector_rankings │   │
+│   │ get_minutely_data()│   │ get_sector_rankings│   │ get_sector_rankings │   │
+│   │ get_fundamental() │    │                  │    │                     │   │
 │   └─────────────────┘    └──────────────────┘    └─────────────────────┘   │
 │            │                       │                       │                │
 │            ▼                       ▼                       ▼                │
 │   ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────────┐   │
 │   │ stock_daily      │    │ market_indices   │    │ 报告/通知/飞书文档   │   │
-│   │ news_intel       │    │ market_boards    │    │                     │   │
-│   │ analysis_history │    │ zt_pool (P2)     │    │                     │   │
-│   │ backtest_results │    │ lhb_* (P2)       │    │                     │   │
+│   │ stock_minutely   │    │ market_boards    │    │                     │   │
+│   │ financial_report │    │ zt_pool (P2)     │    │                     │   │
+│   │ earnings_forecast│    │ lhb_* (P2)       │    │                     │   │
+│   │ stock_basic_info │    │                  │    │                     │   │
 │   └─────────────────┘    └──────────────────┘    └─────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -63,7 +65,7 @@
 
 ## 抓取了什么数据
 
-### 一、个股日线数据（核心）
+### 一、个股日线数据（核心，含预计算技术指标）
 
 | 数据项 | 说明 | 来源 |
 |--------|------|------|
@@ -75,10 +77,54 @@
 | `turnover` | 换手率 | 实时行情增强 |
 | `volume_ratio` | 量比 | 实时行情增强 |
 | `pe` / `pb` | 市盈率/市净率 | 实时行情增强 |
+| `ma5/10/20/60` | 移动平均线 | 基于2年历史预计算 |
+| `macd_dif/dea/bar/signal` | MACD(12,26,9) | 基于2年历史预计算 |
+| `rsi_6/12/24/signal` | RSI(Wilder) | 基于2年历史预计算 |
+| `kdj_k/d/j/signal` | KDJ(9,3,3) | 基于2年历史预计算 |
+| `bias_ma5/10/20` | 乖离率 | 基于2年历史预计算 |
+| `boll_mid/upper/lower` | 布林带(20,2) | 基于2年历史预计算 |
+| `candle_pattern` | 单K线形态 | 基于2年历史预计算 |
 
 **存储表**：`stock_daily`
 
-### 二、市场全景数据（本次新增）
+### 二、60分钟K线数据
+
+| 数据项 | 说明 | 来源 |
+|--------|------|------|
+| `date` + `time` | 交易日期 + 时间(HHMMSS) | Baostock |
+| `open` / `high` / `low` / `close` | OHLC | Baostock |
+| `volume` / `amount` | 成交量/额 | Baostock |
+
+**存储表**：`stock_minutely`
+
+**注意**：Baostock 60分钟数据仅覆盖个股，指数（如创业板指399006）无60分钟数据。
+
+### 三、个股基本信息
+
+| 数据项 | 说明 | 来源 |
+|--------|------|------|
+| `name` | 股票名称 | Baostock / AkShare |
+| `market` | 市场(sh/sz/bj/hk/us) | 自动识别 |
+| `security_type` | 类型(stock/index/etf) | 自动识别 |
+| `industry` | 所属行业 | Baostock |
+| `list_date` | 上市日期 | Baostock |
+| `total_shares` / `float_shares` | 总股本/流通股本 | Baostock |
+
+**存储表**：`stock_basic_info`
+
+### 四、基本面数据（季度）
+
+| 数据项 | 说明 | 来源 |
+|--------|------|------|
+| **财报表** | 营收、净利润、毛利率、ROE、EPS 等季度指标 | AkShare（主源） |
+| **成长能力** | 营收同比、净利同比、净资产同比 | baostock `query_growth_data` |
+| **业绩预告** | 预增/预减/扭亏/预亏及净利润变动区间 | baostock `query_forecast_report` |
+
+**存储表**：`financial_report`, `earnings_forecast`
+
+**注意**：`query_forecast_report` 并非所有公司都有数据（蓝筹通常不发预告），入库和 prompt 注入时均做空值兜底。
+
+### 五、市场全景数据
 
 | 数据项 | 说明 | 当前状态 |
 |--------|------|----------|
@@ -91,7 +137,7 @@
 
 **存储表**：`market_indices`, `market_boards`, `zt_pool`, `strong_stocks`, `lhb_basic`, `lhb_stock_detail`, `lhb_stock_statistic`, `lhb_yyb_most`, `lhb_yyb_capital`
 
-### 三、实时行情增强数据
+### 六、实时行情增强数据
 
 在个股分析阶段，为每只股票额外获取一次实时行情（非历史 K 线）：
 
@@ -101,14 +147,14 @@
 | 换手率 (`turnover`) | 判断筹码活跃度 | 同上 |
 | 市盈率/市净率 | 估值参考 | 同上 |
 
-### 四、新闻与情报数据
+### 七、新闻与情报数据
 
 | 数据项 | 说明 | 存储表 |
 |--------|------|--------|
 | 新闻搜索结果 | 多搜索引擎聚合的新闻摘要 | `news_intel` |
 | 基本面快照 | 财务指标、业绩预期 | `fundamental_snapshot` |
 
-### 五、分析结果与回测数据
+### 八、分析结果与回测数据
 
 | 数据项 | 说明 | 存储表 |
 |--------|------|--------|
@@ -200,15 +246,15 @@ Efinance (P0) → Akshare (P1) → Pytdx (P2) → Baostock (P3) → Yfinance (P4
 
 ### 各数据源能力矩阵
 
-| 数据源 | 个股日线 | 实时行情 | 指数行情 | 板块排行 | 全市场证券 | 特点 |
-|--------|----------|----------|----------|----------|------------|------|
-| **Efinance** | ✅ | ✅ | ✅ | ✅ | ❌ | 东财数据最全，易被封 |
-| **Akshare** | ✅ | ✅ | ✅ | ✅ | ❌ | 免费稳定，接口丰富 |
-| **Tushare** | ✅ | ❌ | ✅ | ❌ | ❌ | 需 Token，数据质量高 |
-| **Pytdx** | ✅ | ❌ | ❌ | ❌ | ❌ | 通达信，内网可用 |
-| **Baostock** | ✅ | ❌ | ❌ | ❌ | ✅ | 免费，需登录，有全市场列表 |
-| **Yfinance** | ✅ | ❌ | ✅ | ❌ | ❌ | 美股/港股兜底 |
-| **TickFlow** | ❌ | ❌ | ✅ | ❌ | ❌ | 指数增强（可选） |
+| 数据源 | 个股日线 | 60分钟 | 实时行情 | 指数行情 | 板块排行 | 全市场证券 | 成长/预告 | 特点 |
+|--------|----------|--------|----------|----------|----------|------------|-----------|------|
+| **Efinance** | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | 东财数据最全，易被封 |
+| **Akshare** | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | 免费稳定，接口丰富 |
+| **Tushare** | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | 需 Token，数据质量高 |
+| **Pytdx** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | 通达信，内网可用 |
+| **Baostock** | ✅ | ✅(个股) | ❌ | ❌ | ❌ | ✅ | ✅ | 免费，需登录，有全市场列表 |
+| **Yfinance** | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | 美股/港股兜底 |
+| **TickFlow** | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | 指数增强（可选） |
 
 ### 故障切换（Failover）
 
@@ -287,6 +333,23 @@ if self.db.has_today_data(code, target_date):
 - WAL 模式已启用（`SQLITE_WAL_ENABLED=true`）
 - 写入重试：指数退避，最多 3 次
 
+### 技术指标预计算策略
+
+所有技术指标在数据抓取阶段基于**完整历史**预计算并落表，而非分析时现场计算：
+
+```
+数据抓取(2年日线) → _calculate_indicators(完整历史) → StockDaily(含指标)
+                                      ↓
+                              pipeline(直读所有指标)
+                                      ↓
+                              analyzer(看到完整技术面)
+```
+
+**关键约束**：
+- `min_periods` 严格等于窗口大小（如 `rolling(26, min_periods=26)`），前 N 天指标为空（NaN），宁可缺失也不给假值
+- 日线指标基于约 485 天（2年）历史计算，确保 EMA 类指标（MACD/KDJ）收敛到与市场软件一致
+- 前 60 天 MA60 为空、前 26 天 MACD 为空——这是正确的行为
+
 ### 数据精度
 
 ```python
@@ -326,34 +389,48 @@ CSV 包含列：`code`, `code_name`, `ipo_date`, `out_date`, `type`, `status`, `
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  stock_daily  │     │ market_indices│     │ market_boards │
-│  (个股日线)   │     │  (主要指数)   │     │  (板块排行)   │
+│stock_basic_info│   │  stock_daily  │     │ stock_minutely│
+│  (基本信息)   │     │  (个股日线)   │     │ (60分钟K线)  │
 ├──────────────┤     ├──────────────┤     ├──────────────┤
-│ code + date  │     │ trade_date   │     │ trade_date   │
-│ (PK)         │     │ index_code   │     │ board_type   │
-│ open/high/...│     │ (UQ)         │     │ board_name   │
-│ volume       │     │ latest_price │     │ source       │
-│ amount       │     │ change_pct   │     │ (UQ)         │
-│ pct_chg      │     │ volume       │     │ change_pct   │
-└──────┬───────┘     └──────────────┘     └──────────────┘
-       │
-       │ 1:N
-       ▼
+│ code (UQ)    │◄────│ code + date  │     │ code+date+time│
+│ name/industry│     │ (UQ)         │     │ (UQ)         │
+│ list_date    │     │ OHLCV+指标   │     │ OHLCV        │
+└──────────────┘     └──────┬───────┘     └──────────────┘
+                            │
+       ┌────────────────────┼────────────────────┐
+       ▼                    ▼                    ▼
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│analysis_history│    │  news_intel  │     │backtest_results│
-│  (分析结果)   │     │  (新闻情报)   │     │  (回测结果)   │
+│financial_report│   │earnings_forecast│   │analysis_history│
+│  (季度财报)   │     │  (业绩预告)   │     │  (分析结果)   │
 ├──────────────┤     ├──────────────┤     ├──────────────┤
-│ code + date  │     │ code + date  │     │ analysis_id  │
-│ report_type  │     │ headline     │     │ eval_date    │
-│ sentiment    │     │ url          │     │ actual_return│
-│ advice       │     │ summary      │     │ accuracy     │
-│ score        │     │ source       │     │ verdict      │
+│ code+date+type│    │ code+forecast_date│  │ code + date  │
+│ revenue/roe  │     │ forecast_type │    │ report_type  │
+│ gross_margin │     │ chg_min/max   │    │ sentiment    │
 └──────────────┘     └──────────────┘     └──────────────┘
+
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│ market_indices│     │ market_boards │     │backtest_results│
+│  (主要指数)   │     │  (板块排行)   │     │  (回测结果)   │
+├──────────────┤     ├──────────────┤     ├──────────────┤
+│ trade_date   │     │ trade_date   │     │ analysis_id  │
+│ index_code   │     │ board_type   │     │ eval_date    │
+│ (UQ)         │     │ board_name   │     │ actual_return│
+│ latest_price │     │ source (UQ)  │     │ accuracy     │
+└──────────────┘     └──────────────┘     └──────────────┘
+
+┌──────────────┐
+│  news_intel  │
+│  (新闻情报)   │
+├──────────────┤
+│ code + date  │
+│ headline     │
+│ url/summary  │
+└──────────────┘
 ```
 
 ### 核心表结构
 
-#### `stock_daily` — 个股日线
+#### `stock_daily` — 个股日线（含预计算技术指标）
 
 ```sql
 CREATE TABLE stock_daily (
@@ -362,7 +439,102 @@ CREATE TABLE stock_daily (
     date DATE NOT NULL,
     open FLOAT, high FLOAT, low FLOAT, close FLOAT,
     volume BIGINT, amount FLOAT, pct_chg FLOAT,
+    -- 移动平均线
+    ma5 FLOAT, ma10 FLOAT, ma20 FLOAT, ma60 FLOAT,
+    volume_ratio FLOAT,
+    -- MACD(12,26,9)
+    macd_dif FLOAT, macd_dea FLOAT, macd_bar FLOAT, macd_signal VARCHAR(8),
+    -- RSI(Wilder's smoothing, 6/12/24)
+    rsi_6 FLOAT, rsi_12 FLOAT, rsi_24 FLOAT, rsi_signal VARCHAR(8),
+    -- KDJ(9,3,3)
+    kdj_k FLOAT, kdj_d FLOAT, kdj_j FLOAT, kdj_signal VARCHAR(8),
+    -- 乖离率
+    bias_ma5 FLOAT, bias_ma10 FLOAT, bias_ma20 FLOAT,
+    -- 布林带(20,2)
+    boll_mid FLOAT, boll_upper FLOAT, boll_lower FLOAT,
+    -- K线形态
+    candle_pattern VARCHAR(32),
+    data_source VARCHAR(50),
     UNIQUE(code, date)
+);
+```
+
+#### `stock_minutely` — 60分钟K线
+
+```sql
+CREATE TABLE stock_minutely (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code VARCHAR(16) NOT NULL,
+    date DATE NOT NULL,
+    time VARCHAR(8) NOT NULL,              -- HHMMSS, e.g. "103000"
+    open FLOAT, high FLOAT, low FLOAT, close FLOAT,
+    volume FLOAT, amount FLOAT, pct_chg FLOAT,
+    data_source VARCHAR(50),
+    UNIQUE(code, date, time)
+);
+```
+
+#### `stock_basic_info` — 个股基本信息
+
+```sql
+CREATE TABLE stock_basic_info (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code VARCHAR(16) NOT NULL UNIQUE,
+    name VARCHAR(128),
+    market VARCHAR(8),                     -- sh / sz / bj / hk / us
+    security_type VARCHAR(16),             -- stock / index / etf
+    industry VARCHAR(128),
+    list_date DATE,
+    status VARCHAR(16),                    -- listed / delisted / suspended
+    total_shares BIGINT,
+    float_shares BIGINT,
+    data_source VARCHAR(50),
+    created_at DATETIME,
+    updated_at DATETIME
+);
+```
+
+#### `financial_report` — 季度财报表
+
+```sql
+CREATE TABLE financial_report (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code VARCHAR(16) NOT NULL,
+    report_date DATE NOT NULL,
+    report_type VARCHAR(10),               -- Q1 / Q2 / Q3 / annual
+    revenue FLOAT,
+    revenue_yoy FLOAT,                     -- 营收同比增长率(%)
+    net_profit_parent FLOAT,
+    net_profit_yoy FLOAT,                  -- 归母净利同比(%)
+    gross_margin FLOAT,                    -- 毛利率(%)
+    net_margin FLOAT,                      -- 净利率(%)
+    debt_ratio FLOAT,                      -- 资产负债率(%)
+    operating_cash_flow FLOAT,
+    roe FLOAT,
+    roe_diluted FLOAT,
+    eps FLOAT,
+    announced_date DATE,
+    data_source VARCHAR(50),
+    UNIQUE(code, report_date, report_type)
+);
+```
+
+#### `earnings_forecast` — 业绩预告
+
+```sql
+CREATE TABLE earnings_forecast (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code VARCHAR(16) NOT NULL,
+    forecast_date DATE NOT NULL,
+    report_date DATE,
+    forecast_type VARCHAR(20),             -- 预增/预减/扭亏/预亏/...
+    forecast_abstract TEXT,
+    chg_min FLOAT,                         -- 净利润变动下限(%)
+    chg_max FLOAT,                         -- 净利润变动上限(%)
+    net_profit_min FLOAT,                  -- 净利润下限(万元)
+    net_profit_max FLOAT,                  -- 净利润上限(万元)
+    data_source VARCHAR(50),
+    UNIQUE(code, forecast_date)
 );
 ```
 
@@ -527,14 +699,15 @@ REALTIME_SOURCE_PRIORITY=tencent,akshare_sina,efinance,akshare_em
 
 | 文件 | 职责 |
 |------|------|
-| `data_provider/base.py` | `DataFetcherManager` 策略管理器 |
-| `data_provider/akshare_fetcher.py` | Akshare 数据源（指数、板块、市场统计） |
-| `data_provider/baostock_fetcher.py` | Baostock 数据源（个股日线、全市场证券列表） |
+| `data_provider/base.py` | `DataFetcherManager` 策略管理器、技术指标预计算 |
+| `data_provider/akshare_fetcher.py` | Akshare 数据源（指数、板块、市场统计、财报） |
+| `data_provider/baostock_fetcher.py` | Baostock 数据源（个股日线、60分钟K线、成长能力、业绩预告、全市场证券列表） |
 | `data_provider/efinance_fetcher.py` | Efinance 数据源（个股日线、实时行情） |
 | `src/core/pipeline.py` | 个股分析主流程（含断点续传） |
-| `src/core/market_data_sync.py` | 收盘市场数据同步（本次新增） |
-| `src/repositories/market_data_repo.py` | 市场全景数据仓库（本次新增） |
+| `src/core/market_data_sync.py` | 收盘市场数据同步 |
+| `src/repositories/market_data_repo.py` | 市场全景数据仓库 |
 | `src/repositories/stock_repo.py` | 个股数据仓库 |
 | `src/services/history_loader.py` | DB-first K 线加载器 |
 | `src/services/backtest_service.py` | 回测服务 |
-| `src/storage.py` | 全部 ORM 模型定义 |
+| `src/storage.py` | 全部 ORM 模型定义（日线/60分钟/基本信息/财报/业绩预告） |
+| `src/analyzer.py` | LLM 分析器（prompt 构建，含技术指标/基本面数据注入） |

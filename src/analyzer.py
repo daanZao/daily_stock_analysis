@@ -1521,7 +1521,46 @@ class GeminiAnalyzer:
 | MA20 | {today.get('ma20', 'N/A')} | 中期趋势线 |
 | 均线形态 | {context.get('ma_status', unknown_text)} | 多头/空头/缠绕 |
 """
-        
+
+        # === 新增：完整技术指标（来自 StockDaily 预计算）===
+        today = context.get('today', {}) if isinstance(context, dict) else {}
+        if today.get('macd_dif') is not None:
+            prompt += f"""
+### 技术指标（基于2年完整历史计算）
+| 指标 | 数值 | 信号 |
+|------|------|------|
+| MACD DIF | {today.get('macd_dif', 'N/A')} | {today.get('macd_signal', '-')} |
+| MACD DEA | {today.get('macd_dea', 'N/A')} | |
+| MACD BAR | {today.get('macd_bar', 'N/A')} | |
+| RSI(6) | {today.get('rsi_6', 'N/A')} | {today.get('rsi_signal', '-')} |
+| RSI(12) | {today.get('rsi_12', 'N/A')} | |
+| RSI(24) | {today.get('rsi_24', 'N/A')} | |
+| KDJ K/D/J | {today.get('kdj_k', 'N/A')} / {today.get('kdj_d', 'N/A')} / {today.get('kdj_j', 'N/A')} | {today.get('kdj_signal', '-')} |
+| 乖离率 MA5 | {today.get('bias_ma5', 'N/A')}% | |
+| 乖离率 MA10 | {today.get('bias_ma10', 'N/A')}% | |
+| 乖离率 MA20 | {today.get('bias_ma20', 'N/A')}% | |
+| BOLL 上轨 | {today.get('boll_upper', 'N/A')} | |
+| BOLL 中轨 | {today.get('boll_mid', 'N/A')} | |
+| BOLL 下轨 | {today.get('boll_lower', 'N/A')} | |
+| K线形态 | {today.get('candle_pattern') or '无显著形态'} | |
+"""
+
+        # 最近5日指标趋势
+        recent = context.get('recent_indicators', []) if isinstance(context, dict) else []
+        if len(recent) >= 3:
+            prompt += "\n### 最近5日指标趋势\n"
+            prompt += "| 日期 | 收盘 | MACD DIF | RSI(6) | KDJ K | 乖离MA5 | K线形态 |\n"
+            prompt += "|------|------|----------|--------|-------|---------|----------|\n"
+            for row in recent[:5]:
+                d = row.get('date', '-')
+                if hasattr(d, 'isoformat'):
+                    d = d.isoformat()
+                prompt += (
+                    f"| {d} | {row.get('close', '-')} | {row.get('macd_dif', '-')} | "
+                    f"{row.get('rsi_6', '-')} | {row.get('kdj_k', '-')} | "
+                    f"{row.get('bias_ma5', '-')}% | {row.get('candle_pattern') or '-'} |\n"
+                )
+
         # 添加实时行情数据（量比、换手率等）
         if 'realtime' in context:
             rt = context['realtime']
@@ -1581,7 +1620,83 @@ class GeminiAnalyzer:
 | TTM 股息率 | {ttm_yield} | 公式：近12个月每股现金分红 / 当前价格 × 100% |
 | TTM 分红事件数 | {ttm_count} | |
 
-> 若上述字段为 N/A 或缺失，请明确写“数据缺失，无法判断”，禁止编造。
+> 若上述字段为 N/A 或缺失，请明确写"数据缺失，无法判断"，禁止编造。
+"""
+
+        # 添加成长能力数据（来自 fundamental_context.growth）
+        growth_block = (
+            fundamental_context.get("growth", {})
+            if isinstance(fundamental_context, dict)
+            else {}
+        )
+        growth_data = (
+            growth_block.get("data", {})
+            if isinstance(growth_block, dict)
+            else {}
+        )
+        if isinstance(growth_data, dict) and growth_data:
+            prompt += f"""
+### 成长能力
+| 指标 | 数值 | 说明 |
+|------|------|------|
+| 营收同比 | {growth_data.get('revenue_yoy', 'N/A')}% | |
+| 净利润同比 | {growth_data.get('net_profit_yoy', 'N/A')}% | |
+| 毛利率 | {growth_data.get('gross_margin', 'N/A')}% | |
+| 净利率 | {growth_data.get('net_margin', 'N/A')}% | |
+"""
+
+        # 添加资金流向数据（来自 fundamental_context.capital_flow）
+        cf_block = (
+            fundamental_context.get("capital_flow", {})
+            if isinstance(fundamental_context, dict)
+            else {}
+        )
+        cf_data = (
+            cf_block.get("data", {})
+            if isinstance(cf_block, dict)
+            else {}
+        )
+        if isinstance(cf_data, dict) and cf_data:
+            stock_flow = cf_data.get("stock_flow", {}) or {}
+            if isinstance(stock_flow, dict) and stock_flow:
+                prompt += f"""
+### 资金流向
+| 指标 | 数值 |
+|------|------|
+| 主力净流入 | {stock_flow.get('main_net_inflow', 'N/A')} 万元 |
+| 超大单净流入 | {stock_flow.get('xl_net_inflow', 'N/A')} 万元 |
+| 大单净流入 | {stock_flow.get('l_net_inflow', 'N/A')} 万元 |
+| 中单净流入 | {stock_flow.get('m_net_inflow', 'N/A')} 万元 |
+| 小单净流入 | {stock_flow.get('s_net_inflow', 'N/A')} 万元 |
+"""
+
+        # 添加数据库中的财报表数据
+        financial_reports = context.get('financial_reports', []) if isinstance(context, dict) else []
+        if financial_reports:
+            prompt += "\n### 季度财务数据（最近4个季度）\n"
+            prompt += "| 报告期 | 营收(亿) | 营收同比 | 归母净利(亿) | 净利同比 | 毛利率 | ROE | EPS |\n"
+            prompt += "|--------|----------|----------|--------------|----------|--------|-----|-----|\n"
+            for r in financial_reports[:4]:
+                rev = r.get('revenue')
+                rev_str = f"{rev/1e8:.2f}" if rev is not None else 'N/A'
+                profit = r.get('net_profit_parent')
+                profit_str = f"{profit/1e8:.2f}" if profit is not None else 'N/A'
+                prompt += (
+                    f"| {r.get('report_date', '-')} | {rev_str} | {r.get('revenue_yoy', '-')}% | "
+                    f"{profit_str} | {r.get('net_profit_yoy', '-')}% | "
+                    f"{r.get('gross_margin', '-')}% | {r.get('roe', '-')}% | {r.get('eps', '-')} |\n"
+                )
+
+        # 添加数据库中的业绩预告
+        forecasts = context.get('earnings_forecasts', []) if isinstance(context, dict) else []
+        if forecasts:
+            prompt += "\n### 最新业绩预告\n"
+            for f in forecasts[:2]:
+                prompt += f"""
+- 公告日期: {f.get('forecast_date', '-')}
+- 预告类型: {f.get('forecast_type', '-')}
+- 预告摘要: {f.get('forecast_abstract', '-')}
+- 净利润变动: {f.get('chg_min', '-')}%~{f.get('chg_max', '-')}%
 """
 
         # 添加筹码分布数据

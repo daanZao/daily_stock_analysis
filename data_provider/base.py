@@ -428,31 +428,167 @@ class BaseFetcher(ABC):
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         计算技术指标
-        
+
+        所有指标使用完整历史数据计算，min_periods 严格等于窗口大小，
+        避免初始值失真。要求输入数据包含至少 200 个交易日以确保
+        MACD/EMA 收敛到与市场软件一致的水平。
+
         计算指标：
-        - MA5, MA10, MA20: 移动平均线
+        - MA5, MA10, MA20, MA60: 移动平均线
+        - MACD: EMA(12/26/9)  DIF = EMA12 - EMA26, DEA = EMA(DIF,9), BAR = (DIF-DEA)*2
+        - RSI: Wilder's smoothing (alpha=1/N), 6/12/24
+        - KDJ: RSV(9) -> K(3) -> D(3) -> J = 3K - 2D
+        - BOLL: MA(20) +- 2 * STD(20)
+        - Bias: (close - MA) / MA * 100, MA5/10/20
+        - Candle: 单K线形态识别
         - Volume_Ratio: 量比（今日成交量 / 5日平均成交量）
         """
         df = df.copy()
-        
-        # 移动平均线
-        df['ma5'] = df['close'].rolling(window=5, min_periods=1).mean()
-        df['ma10'] = df['close'].rolling(window=10, min_periods=1).mean()
-        df['ma20'] = df['close'].rolling(window=20, min_periods=1).mean()
-        
-        # 量比：当日成交量 / 5日平均成交量
-        # 注意：此处的 volume_ratio 是“日线成交量 / 前5日均量(shift 1)”的相对倍数，
-        # 与部分交易软件口径的“分时量比（同一时刻对比）”不同，含义更接近“放量倍数”。
-        # 该行为目前保留（按需求不改逻辑）。
-        avg_volume_5 = df['volume'].rolling(window=5, min_periods=1).mean()
-        df['volume_ratio'] = df['volume'] / avg_volume_5.shift(1)
-        df['volume_ratio'] = df['volume_ratio'].fillna(1.0)
-        
-        # 保留2位小数
-        for col in ['ma5', 'ma10', 'ma20', 'volume_ratio']:
+
+        # 确保数据按日期升序排列
+        df = df.sort_values('date', ascending=True).reset_index(drop=True)
+        close = df['close']
+        high = df['high']
+        low = df['low']
+        open_ = df['open']
+        volume = df['volume']
+
+        # === 移动平均线 ===
+        df['ma5'] = close.rolling(window=5, min_periods=5).mean()
+        df['ma10'] = close.rolling(window=10, min_periods=10).mean()
+        df['ma20'] = close.rolling(window=20, min_periods=20).mean()
+        df['ma60'] = close.rolling(window=60, min_periods=60).mean()
+
+        # === 量比：当日成交量 / 前5日均量(shift 1) ===
+        avg_volume_5 = volume.rolling(window=5, min_periods=5).mean()
+        df['volume_ratio'] = volume / avg_volume_5.shift(1)
+
+        # === MACD (EMA12/26/9) ===
+        ema_fast = close.ewm(span=12, adjust=False, min_periods=12).mean()
+        ema_slow = close.ewm(span=26, adjust=False, min_periods=26).mean()
+        df['macd_dif'] = ema_fast - ema_slow
+        df['macd_dea'] = df['macd_dif'].ewm(span=9, adjust=False, min_periods=9).mean()
+        df['macd_bar'] = (df['macd_dif'] - df['macd_dea']) * 2
+
+        # MACD 金叉/死叉信号
+        df['macd_signal'] = 'none'
+        dif_gt_dea = df['macd_dif'] > df['macd_dea']
+        df.loc[dif_gt_dea & (~dif_gt_dea.shift(1).fillna(False)), 'macd_signal'] = 'golden_cross'
+        df.loc[(~dif_gt_dea) & dif_gt_dea.shift(1).fillna(False), 'macd_signal'] = 'dead_cross'
+
+        # === RSI (Wilder's smoothing, alpha = 1 / N) ===
+        delta = close.diff()
+        for period in (6, 12, 24):
+            gain = delta.where(delta > 0, 0.0)
+            loss = (-delta).where(delta < 0, 0.0)
+            # Wilder's smoothing: EWM with alpha = 1 / period
+            avg_gain = gain.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+            avg_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+            rs = avg_gain / avg_loss.replace(0, 1e-10)
+            df[f'rsi_{period}'] = 100 - (100 / (1 + rs))
+
+        # RSI 信号: 超买(>80) / 超卖(<20) / 中性
+        df['rsi_signal'] = 'neutral'
+        latest_rsi = df['rsi_6']
+        df.loc[latest_rsi > 80, 'rsi_signal'] = 'overbought'
+        df.loc[latest_rsi < 20, 'rsi_signal'] = 'oversold'
+
+        # === KDJ (9,3,3) ===
+        n = 9
+        lowest_low = low.rolling(window=n, min_periods=n).min()
+        highest_high = high.rolling(window=n, min_periods=n).max()
+        rsv = (close - lowest_low) / (highest_high - lowest_low).replace(0, 1e-10) * 100
+
+        # K = 2/3 * K_prev + 1/3 * RSV, D = 2/3 * D_prev + 1/3 * K
+        # 使用 ewm 模拟递归: alpha=1/3 对应 平滑系数 1/3
+        df['kdj_k'] = rsv.ewm(com=2, adjust=False, min_periods=n).mean()
+        df['kdj_d'] = df['kdj_k'].ewm(com=2, adjust=False, min_periods=n).mean()
+        df['kdj_j'] = 3 * df['kdj_k'] - 2 * df['kdj_d']
+
+        # KDJ 信号
+        df['kdj_signal'] = 'none'
+        k_gt_d = df['kdj_k'] > df['kdj_d']
+        df.loc[k_gt_d & (~k_gt_d.shift(1).fillna(False)), 'kdj_signal'] = 'golden_cross'
+        df.loc[(~k_gt_d) & k_gt_d.shift(1).fillna(False), 'kdj_signal'] = 'dead_cross'
+        df.loc[df['kdj_j'] > 100, 'kdj_signal'] = 'overbought'
+        df.loc[df['kdj_j'] < 0, 'kdj_signal'] = 'oversold'
+
+        # === 乖离率 Bias ===
+        df['bias_ma5'] = (close - df['ma5']) / df['ma5'].replace(0, 1e-10) * 100
+        df['bias_ma10'] = (close - df['ma10']) / df['ma10'].replace(0, 1e-10) * 100
+        df['bias_ma20'] = (close - df['ma20']) / df['ma20'].replace(0, 1e-10) * 100
+
+        # === 布林带 BOLL (20, 2) ===
+        boll_ma = close.rolling(window=20, min_periods=20).mean()
+        boll_std = close.rolling(window=20, min_periods=20).std(ddof=0)
+        df['boll_mid'] = boll_ma
+        df['boll_upper'] = boll_ma + 2 * boll_std
+        df['boll_lower'] = boll_ma - 2 * boll_std
+
+        # === K线形态识别 (单K线) ===
+        body = (close - open_).abs()
+        upper_shadow = high - open_.where(close >= open_, close)
+        lower_shadow = open_.where(close >= open_, close) - low
+        total_range = high - low
+        body_pct = body / total_range.replace(0, 1e-10)
+
+        conditions = pd.Series([''] * len(df), index=df.index)
+
+        # Doji: 实体极小 (小于总范围的 5%)
+        is_doji = body_pct < 0.05
+        conditions = conditions.where(~is_doji, 'doji')
+
+        # Hammer: 下影线 > 2*实体, 上影线 < 实体, 出现在下跌后
+        is_hammer = (
+            (lower_shadow > 2 * body) &
+            (upper_shadow < body) &
+            (close > open_) &  # 阳线
+            (close.shift(1) < open_.shift(1))  # 前一日阴线
+        )
+        conditions = conditions.where(~is_hammer, 'hammer')
+
+        # Shooting Star: 上影线 > 2*实体, 下影线 < 实体, 出现在上涨后
+        is_shooting = (
+            (upper_shadow > 2 * body) &
+            (lower_shadow < body) &
+            (close < open_) &  # 阴线
+            (close.shift(1) > open_.shift(1))  # 前一日阳线
+        )
+        conditions = conditions.where(~is_shooting, 'shooting_star')
+
+        # Bullish Engulfing: 今日阳线完全包含昨日阴线实体
+        is_bullish_eng = (
+            (close > open_) &
+            (close.shift(1) < open_.shift(1)) &
+            (open_ <= close.shift(1)) &
+            (close >= open_.shift(1))
+        )
+        conditions = conditions.where(~is_bullish_eng, 'bullish_engulfing')
+
+        # Bearish Engulfing: 今日阴线完全包含昨日阳线实体
+        is_bearish_eng = (
+            (close < open_) &
+            (close.shift(1) > open_.shift(1)) &
+            (open_ >= close.shift(1)) &
+            (close <= open_.shift(1))
+        )
+        conditions = conditions.where(~is_bearish_eng, 'bearish_engulfing')
+
+        df['candle_pattern'] = conditions.replace('', None)
+
+        # === 保留2位小数 (数值列) ===
+        numeric_cols = [
+            'ma5', 'ma10', 'ma20', 'ma60', 'volume_ratio',
+            'macd_dif', 'macd_dea', 'macd_bar',
+            'rsi_6', 'rsi_12', 'rsi_24',
+            'kdj_k', 'kdj_d', 'kdj_j',
+            'bias_ma5', 'bias_ma10', 'bias_ma20',
+            'boll_mid', 'boll_upper', 'boll_lower',
+        ]
+        for col in numeric_cols:
             if col in df.columns:
                 df[col] = df[col].round(2)
-        
+
         return df
     
     @staticmethod
@@ -899,8 +1035,74 @@ class DataFetcherManager:
             self._fetchers.append(fetcher)
             self._fetchers.sort(key=lambda f: f.priority)
     
+    def get_minutely_data(
+        self,
+        stock_code: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        days: int = 120,
+        frequency: str = "60",
+    ) -> Tuple[pd.DataFrame, str]:
+        """
+        获取60分钟K线数据（路由到 BaostockFetcher）
+
+        当前仅 Baostock 支持60分钟历史数据，
+        若 Baostock 失败则抛出异常。
+
+        Args:
+            stock_code: 股票代码
+            start_date: 开始日期 YYYY-MM-DD
+            end_date: 结束日期 YYYY-MM-DD
+            days: 获取天数（当 start_date 未指定时使用）
+            frequency: 频率，默认 "60"
+
+        Returns:
+            Tuple[DataFrame, str]: (数据, 成功的数据源名称)
+        """
+        stock_code = normalize_stock_code(stock_code)
+        request_start = time.time()
+
+        for fetcher in self._get_fetchers_snapshot():
+            if fetcher.name != "BaostockFetcher":
+                continue
+            if not hasattr(fetcher, 'get_minutely_data'):
+                continue
+            try:
+                logger.info(
+                    f"[数据源尝试] [{fetcher.name}] 获取 {stock_code} 60分钟数据..."
+                )
+                df = self._call_fetcher_method(
+                    fetcher,
+                    "get_minutely_data",
+                    stock_code=stock_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                    days=days,
+                    frequency=frequency,
+                )
+                if df is not None and not df.empty:
+                    elapsed = time.time() - request_start
+                    logger.info(
+                        f"[数据源完成] {stock_code} 60分钟数据使用 [{fetcher.name}] 获取成功: "
+                        f"rows={len(df)}, elapsed={elapsed:.2f}s"
+                    )
+                    return df, fetcher.name
+            except Exception as e:
+                error_type, error_reason = summarize_exception(e)
+                logger.warning(
+                    f"[数据源失败] [{fetcher.name}] {stock_code} 60分钟数据: "
+                    f"error_type={error_type}, reason={error_reason}"
+                )
+                raise DataFetchError(
+                    f"[{fetcher.name}] {stock_code} 60分钟数据获取失败: {error_reason}"
+                ) from e
+
+        raise DataFetchError(
+            f"{stock_code} 60分钟数据获取失败: 无可用数据源"
+        )
+
     def get_daily_data(
-        self, 
+        self,
         stock_code: str,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
