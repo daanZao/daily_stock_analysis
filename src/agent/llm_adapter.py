@@ -422,6 +422,11 @@ class LLMToolAdapter:
         if tools:
             call_kwargs["tools"] = tools
 
+        logger.debug(
+            "[_call_litellm_model] model=%s timeout=%s keys=%s",
+            model, call_kwargs.get("timeout"), list(call_kwargs.keys()),
+        )
+
         # Use Router for primary model (multi-key), direct litellm for others
         use_channel_router = self._has_channel_config()
         _router_model_names = set(get_configured_llm_models(self._config.llm_model_list))

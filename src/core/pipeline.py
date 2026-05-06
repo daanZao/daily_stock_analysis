@@ -27,7 +27,13 @@ from src.storage import get_db
 from data_provider import DataFetcherManager
 from data_provider.base import normalize_stock_code
 from data_provider.realtime_types import ChipDistribution
-from src.analyzer import GeminiAnalyzer, AnalysisResult, fill_chip_structure_if_needed, fill_price_position_if_needed
+from src.analyzer import (
+    GeminiAnalyzer,
+    AnalysisResult,
+    fill_chip_structure_if_needed,
+    fill_price_position_if_needed,
+    format_analysis_prompt,
+)
 from src.data.stock_mapping import STOCK_NAME_MAP
 from src.notification import NotificationService, NotificationChannel
 from src.report_language import (
@@ -820,47 +826,114 @@ class StockAnalysisPipeline:
             # Build executor from shared factory (ToolRegistry and SkillManager prototype are cached)
             executor = build_agent_executor(self.config, getattr(self.config, 'agent_skills', None) or None)
 
-            # Build initial context to avoid redundant tool calls
+            # --- Single-turn Agent path: prefetch all data, format prompt, call once ---
+
+            # Issue #1066: ensure deep history is in DB BEFORE building context.
+            # Must run before get_analysis_context so that MA50/150/200 are
+            # populated in the latest row when the prompt is formatted.
+            self._ensure_agent_history(code)
+
+            # 1. 获取分析上下文（技术面数据）
+            context = self.db.get_analysis_context(code)
+            if context is None:
+                logger.warning(f"[{code}] 无法获取历史行情数据，将仅基于新闻和实时行情分析")
+                _mkt_date = get_market_now(
+                    get_market_for_stock(normalize_stock_code(code))
+                ).date()
+                context = {
+                    'code': code,
+                    'stock_name': stock_name,
+                    'date': _mkt_date.isoformat(),
+                    'data_missing': True,
+                    'today': {},
+                    'yesterday': {}
+                }
+
+            # 2. 增强上下文数据（添加实时行情、筹码、趋势分析结果、SEPA 数据等）
+            enhanced_context = self._enhance_context(
+                context,
+                realtime_quote,
+                chip_data,
+                trend_result,
+                stock_name,
+                fundamental_context,
+            )
+
+            # 3. 获取新闻情报（预取，避免 Agent 工具重复搜索）
+            news_context = None
+            if self.search_service is not None and self.search_service.is_available:
+                try:
+                    intel_results = self.search_service.search_comprehensive_intel(
+                        stock_code=code,
+                        stock_name=stock_name,
+                        max_searches=5,
+                    )
+                    if intel_results:
+                        news_context = self.search_service.format_intel_report(
+                            intel_results, stock_name
+                        )
+                        total_results = sum(
+                            len(r.results) for r in intel_results.values() if r.success
+                        )
+                        logger.info(f"[{code}] Agent 单次模式: 情报搜索完成，共 {total_results} 条结果")
+                        # 保存新闻情报到数据库
+                        try:
+                            query_context = self._build_query_context(query_id=query_id)
+                            for dim_name, response in intel_results.items():
+                                if response and response.success and response.results:
+                                    self.db.save_news_intel(
+                                        code=code,
+                                        name=stock_name,
+                                        dimension=dim_name,
+                                        query=response.query,
+                                        response=response,
+                                        query_context=query_context,
+                                    )
+                        except Exception as e:
+                            logger.warning(f"[{code}] Agent 单次模式保存新闻情报失败: {e}")
+                except Exception as e:
+                    logger.warning(f"[{code}] Agent 单次模式新闻搜索失败: {e}")
+
+            # 4. Social sentiment injection (US stocks only)
+            if (
+                self.social_sentiment_service is not None
+                and self.social_sentiment_service.is_available
+                and is_us_stock_code(code)
+            ):
+                try:
+                    social_context = self.social_sentiment_service.get_social_context(code)
+                    if social_context:
+                        if news_context:
+                            news_context = news_context + "\n\n" + social_context
+                        else:
+                            news_context = social_context
+                        logger.info(f"[{code}] Agent 单次模式: social sentiment 已注入")
+                except Exception as e:
+                    logger.warning(f"[{code}] Agent 单次模式 social sentiment 获取失败: {e}")
+
+            # 5. 格式化 prompt 数据
+            formatted_data = format_analysis_prompt(
+                context=enhanced_context,
+                stock_name=stock_name,
+                news_context=news_context,
+                report_language=report_language,
+            )
+
+            # 6. 构建 initial_context for run_once
             initial_context = {
                 "stock_code": code,
                 "stock_name": stock_name,
                 "report_type": report_type.value,
                 "report_language": report_language,
-                "fundamental_context": fundamental_context,
+                "formatted_data": formatted_data,
             }
-            
-            if realtime_quote:
-                initial_context["realtime_quote"] = self._safe_to_dict(realtime_quote)
-            if chip_data:
-                initial_context["chip_distribution"] = self._safe_to_dict(chip_data)
-            if trend_result:
-                initial_context["trend_result"] = self._safe_to_dict(trend_result)
 
-            # Agent path: inject social sentiment as news_context so both
-            # executor (_build_user_message) and orchestrator (ctx.set_data)
-            # can consume it through the existing news_context channel
-            if self.social_sentiment_service is not None and self.social_sentiment_service.is_available and is_us_stock_code(code):
-                try:
-                    social_context = self.social_sentiment_service.get_social_context(code)
-                    if social_context:
-                        existing = initial_context.get("news_context")
-                        if existing:
-                            initial_context["news_context"] = existing + "\n\n" + social_context
-                        else:
-                            initial_context["news_context"] = social_context
-                        logger.info(f"[{code}] Agent mode: social sentiment data injected into news_context")
-                except Exception as e:
-                    logger.warning(f"[{code}] Agent mode: social sentiment fetch failed: {e}")
-
-            # Issue #1066: ensure deep history is in DB before agent tools run
-            self._ensure_agent_history(code)
-
-            # 运行 Agent
+            # 7. 单次 LLM 调用
             if report_language == "en":
                 message = f"Analyze stock {code} ({stock_name}) and return the full decision dashboard JSON in English."
             else:
                 message = f"请分析股票 {code} ({stock_name})，并生成决策仪表盘报告。"
-            agent_result = executor.run(message, context=initial_context)
+            agent_result = executor.run_once(message, context=initial_context)
 
             # 转换为 AnalysisResult
             result = self._agent_result_to_analysis_result(
@@ -893,29 +966,6 @@ class StockAnalysisPipeline:
                 fill_price_position_if_needed(result, trend_result, realtime_quote)
 
             resolved_stock_name = result.name if result and result.name else stock_name
-
-            # 保存新闻情报到数据库（Agent 工具结果仅用于 LLM 上下文，未持久化，Fixes #396）
-            # 使用 search_stock_news（与 Agent 工具调用逻辑一致），仅 1 次 API 调用，无额外延迟
-            if self.search_service is not None and self.search_service.is_available:
-                try:
-                    news_response = self.search_service.search_stock_news(
-                        stock_code=code,
-                        stock_name=resolved_stock_name,
-                        max_results=5
-                    )
-                    if news_response.success and news_response.results:
-                        query_context = self._build_query_context(query_id=query_id)
-                        self.db.save_news_intel(
-                            code=code,
-                            name=resolved_stock_name,
-                            dimension="latest_news",
-                            query=news_response.query,
-                            response=news_response,
-                            query_context=query_context
-                        )
-                        logger.info(f"[{code}] Agent 模式: 新闻情报已保存 {len(news_response.results)} 条")
-                except Exception as e:
-                    logger.warning(f"[{code}] Agent 模式保存新闻情报失败: {e}")
 
             # 保存分析历史记录
             if result and result.success:
@@ -1005,12 +1055,80 @@ class StockAnalysisPipeline:
             # methods (get_sniper_points, get_core_conclusion, etc.) expect that inner
             # structure, so we unwrap it here.
             result.dashboard = dash.get("dashboard") or dash
+            # Backfill legacy flat fields from dashboard for downstream compatibility
+            self._backfill_analysis_fields(result, dash)
         else:
             self._apply_trend_fallback(result, trend_result, report_language)
             if not result.error_message:
                 result.error_message = "Agent failed to generate a valid decision dashboard" if report_language == "en" else "Agent 未能生成有效的决策仪表盘"
 
         return result
+
+    @staticmethod
+    def _backfill_analysis_fields(result: AnalysisResult, dash: Dict[str, Any]) -> None:
+        """Backfill legacy flat fields from dashboard for downstream compatibility.
+
+        Agent mode stores analysis text inside dashboard.data_perspective as strings,
+        but downstream consumers (frontend / markdown generator) expect top-level
+        flat fields. This method bridges the two formats without touching the UI.
+        """
+        inner = dash.get("dashboard") or dash
+        if not isinstance(inner, dict):
+            return
+
+        dp = inner.get("data_perspective", {})
+        if isinstance(dp, dict):
+            # trend_analysis: combine trend_status + price_position
+            if not result.trend_analysis:
+                parts = []
+                if dp.get("trend_status"):
+                    parts.append(f"趋势状态：{dp['trend_status']}")
+                if dp.get("price_position"):
+                    parts.append(f"价格位置：{dp['price_position']}")
+                result.trend_analysis = "\n".join(parts)
+            # volume_analysis
+            if not result.volume_analysis and dp.get("volume_analysis"):
+                result.volume_analysis = dp["volume_analysis"]
+            # technical_analysis: synthetic fallback
+            if not result.technical_analysis:
+                tech_parts = []
+                if dp.get("trend_status"):
+                    tech_parts.append(f"趋势：{dp['trend_status']}")
+                if dp.get("volume_analysis"):
+                    tech_parts.append(f"量能：{dp['volume_analysis']}")
+                if dp.get("chip_structure"):
+                    tech_parts.append(f"筹码：{dp['chip_structure']}")
+                result.technical_analysis = "\n".join(tech_parts)
+
+        intel = inner.get("intelligence", {})
+        if isinstance(intel, dict):
+            if not result.news_summary and intel.get("latest_news"):
+                news = intel["latest_news"]
+                if isinstance(news, list) and news:
+                    result.news_summary = "\n".join(
+                        f"- {n.get('title', '') or n.get('content', '')}" for n in news[:5]
+                    )
+                elif isinstance(news, str):
+                    result.news_summary = news
+            if not result.market_sentiment and intel.get("sentiment_summary"):
+                result.market_sentiment = intel["sentiment_summary"]
+            if not result.fundamental_analysis and intel.get("earnings_outlook"):
+                result.fundamental_analysis = intel["earnings_outlook"]
+
+        core = inner.get("core_conclusion", {})
+        if isinstance(core, dict):
+            if not result.short_term_outlook and core.get("time_sensitivity"):
+                result.short_term_outlook = core["time_sensitivity"]
+            if not result.buy_reason and core.get("one_sentence"):
+                result.buy_reason = core["one_sentence"]
+
+        battle = inner.get("battle_plan", {})
+        if isinstance(battle, dict):
+            if not result.risk_warning:
+                checklist = battle.get("action_checklist", [])
+                risks = [c for c in (checklist or []) if isinstance(c, str) and "❌" in c]
+                if risks:
+                    result.risk_warning = "\n".join(risks)
 
     @staticmethod
     def _apply_trend_fallback(

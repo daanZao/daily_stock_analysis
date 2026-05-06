@@ -83,4 +83,5 @@ static/
 .strategies
 
 # 用户设计文档，中间态的文档
-_userwork/finish*
+_userwork/*
+!_userwork/**/*.md

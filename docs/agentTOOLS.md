@@ -81,7 +81,7 @@
 |------|------|
 | 参数 | `stock_code: string` |
 | 返回 | `{stock_code, status, stock_return_1y_pct, index_return_1y_pct, rs_ratio, rs_rank_pct, pass_sepa_rs_70}` |
-| 用途 | SEPA Trend Template 规则 #8（RS ≥ 70）；指数 `000300` 无数据时仅返回个股涨幅 |
+| 用途 | SEPA Trend Template 规则 #8（RS ≥ 70）；沪深300指数（`000300`）通过 `index_daily` 获取并缓存至 `stock_daily`，首次失败后不再重复遍历数据源 |
 
 ---
 

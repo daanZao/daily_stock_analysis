@@ -82,16 +82,15 @@ def _handle_analyze_trend(stock_code: str) -> dict:
 
 analyze_trend_tool = ToolDefinition(
     name="analyze_trend",
-    description="Run comprehensive technical trend analysis on a stock. "
-                "Fetches historical data from database or data source. "
-                "Returns MA alignment, bias rates, MACD status, RSI levels, "
-                "volume analysis, support/resistance levels, and a buy/sell signal "
-                "with a score (0-100).",
+    description="对股票进行全面的技术面趋势分析。"
+                "从数据库或数据源获取历史数据。"
+                "返回均线排列、乖离率、MACD 状态、RSI 水平、"
+                "量能分析、支撑/阻力位，以及买卖信号评分（0-100）。",
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="Stock code to analyze, e.g., '600519'",
+            description="要分析的股票代码，例如 '600519'",
         ),
     ],
     handler=_handle_analyze_trend,
@@ -160,28 +159,28 @@ def _handle_calculate_ma(stock_code: str, periods: Optional[str] = None, days: i
 
 calculate_ma_tool = ToolDefinition(
     name="calculate_ma",
-    description="Calculate moving averages (MA5/10/20/50/60/150/200 or custom periods) "
-                "for a stock. Returns each MA value, price bias %, and whether price "
-                "is above each MA. Also returns overall MA alignment (多头/空头/混合). "
-                "SEPA Trend Template requires 50/150/200 MAs.",
+    description="计算股票的移动平均线（MA5/10/20/50/60/150/200 或自定义周期）。"
+                "返回各均线数值、价格乖离率、以及价格是否在各均线上方。"
+                "同时返回整体均线排列状态（多头/空头/混合）。"
+                "SEPA 趋势模板需要 50/150/200 日均线。",
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="Stock code, e.g., '600519'",
+            description="股票代码，例如 '600519'",
         ),
         ToolParameter(
             name="periods",
             type="string",
-            description="Comma-separated MA periods to calculate (default: '5,10,20,50,60,150,200'). "
-                        "E.g., '5,10,20,60'",
+            description="要计算的均线周期，逗号分隔（默认：'5,10,20,50,60,150,200'）。"
+                        "例如：'5,10,20,60'",
             required=False,
             default="5,10,20,50,60,150,200",
         ),
         ToolParameter(
             name="days",
             type="integer",
-            description="Number of trading days to fetch history for (default: 120)",
+            description="获取历史数据的交易天数（默认：120）",
             required=False,
             default=120,
         ),
@@ -196,108 +195,348 @@ calculate_ma_tool = ToolDefinition(
 # ============================================================
 
 def _handle_get_volume_analysis(stock_code: str, days: int = 30) -> dict:
-    """Analyse volume-price patterns over recent trading days."""
+    """量价分析：全局结构 -> 特殊单日 -> 最近5日演变。"""
     from src.services.history_loader import load_history_df
     import pandas as pd
+    import numpy as np
 
-    df, source = load_history_df(stock_code, days=max(days + 20, 60))
-
+    # 加载足够长的历史用于计算20日基准和平台识别
+    df, source = load_history_df(stock_code, days=max(days + 40, 90))
     if df is None or df.empty:
-        return {"error": f"No historical data for {stock_code}"}
+        return {"error": f"{stock_code} 无历史数据"}
 
-    df = df.tail(days).copy()
-    if len(df) < 5:
-        return {"error": f"Insufficient data for volume analysis (got {len(df)} days, need >= 5)"}
+    required = ['open', 'high', 'low', 'close', 'volume']
+    if not all(c in df.columns for c in required):
+        return {"error": f"数据列缺失，需要 {required}"}
 
-    close = df["close"]
-    volume = df["volume"]
+    for c in required:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    df = df.dropna(subset=required)
+    if len(df) < 25:
+        return {"error": f"数据不足（仅 {len(df)} 天，需 >= 25 天）"}
 
-    # Average volumes
-    avg_vol_5 = float(volume.tail(5).mean())
-    avg_vol_10 = float(volume.tail(10).mean())
-    avg_vol_20 = float(volume.tail(20).mean()) if len(df) >= 20 else avg_vol_10
-    latest_vol = float(volume.iloc[-1])
-    vol_ratio_5d = round(latest_vol / avg_vol_5, 2) if avg_vol_5 > 0 else None
-    vol_ratio_20d = round(latest_vol / avg_vol_20, 2) if avg_vol_20 > 0 else None
+    # ========== 基础指标计算（基于完整历史） ==========
+    df['ma20'] = df['close'].rolling(20).mean()
+    df['ma20_vol'] = df['volume'].rolling(20).mean()
+    df['pct_change'] = df['close'].pct_change() * 100
+    df['body'] = df['close'] - df['open']
+    df['body_pct'] = abs(df['body']) / df['open'] * 100
+    df['upper_shadow'] = df['high'] - df[['open', 'close']].max(axis=1)
+    df['lower_shadow'] = df[['open', 'close']].min(axis=1) - df['low']
+    df['is_up'] = df['close'] > df['open']
+    df['is_yang'] = df['close'] >= df['open']
 
-    # Price direction for each day
-    price_up = close.diff() > 0  # True = up day
+    # 平台与极值（用于识别突破）
+    df['high_20'] = df['high'].rolling(20).max()
+    df['low_20'] = df['low'].rolling(20).min()
+    df['vol_ratio'] = df['volume'] / df['ma20_vol']
+    df['max_vol_20'] = df['volume'].rolling(20).max()
+    df['min_vol_20'] = df['volume'].rolling(20).min()
+    df['is_new_high'] = df['close'] >= df['high_20'].shift(1) * 0.998
+    df['is_new_low'] = df['close'] <= df['low_20'].shift(1) * 1.002
+    df['is_above_ma20'] = df['close'] > df['ma20']
+    df['platform_high_5'] = df['high'].rolling(5).max().shift(1)
 
-    # Volume-price correlation (last N days)
-    try:
-        import numpy as np
-        vp_corr = float(pd.Series(volume.values, dtype=float).corr(pd.Series(close.values, dtype=float)))
-        vp_corr = round(vp_corr, 3)
-    except Exception:
-        vp_corr = None
+    # 截取分析窗口
+    adf = df.tail(days).copy()
 
-    # Detect shrinking volume on up days (bearish divergence) vs expanding on up days (healthy)
-    up_days = df[price_up]
-    down_days = df[~price_up]
-    avg_up_vol = float(up_days["volume"].mean()) if len(up_days) > 0 else 0
-    avg_down_vol = float(down_days["volume"].mean()) if len(down_days) > 0 else 0
+    # ========== 第一步：全局量价配合全貌 ==========
+    # 1.1 健康量价同步率（涨放量+跌缩量 的天数占比）
+    adf['healthy_pv'] = (
+        (adf['is_up'] & (adf['volume'] > adf['ma20_vol'])) |
+        (~adf['is_up'] & (adf['volume'] < adf['ma20_vol']))
+    )
+    healthy_pv_ratio = round(adf['healthy_pv'].mean(), 2)
 
-    # Volume trend: compare last 5 days vs prior 5 days
-    if len(volume) >= 10:
-        recent_5_avg = float(volume.tail(5).mean())
-        prior_5_avg = float(volume.iloc[-10:-5].mean())
-        vol_trend_pct = round((recent_5_avg - prior_5_avg) / prior_5_avg * 100, 1) if prior_5_avg > 0 else 0
-        vol_trend = "放量" if vol_trend_pct > 20 else "缩量" if vol_trend_pct < -20 else "量能平稳"
+    # 1.2 量价趋势一致性（价格MA5斜率 vs 成交量MA5斜率）
+    adf['price_ma5'] = adf['close'].rolling(5).mean()
+    adf['vol_ma5'] = adf['volume'].rolling(5).mean()
+    adf['price_slope'] = adf['price_ma5'].diff()
+    adf['vol_slope'] = adf['vol_ma5'].diff()
+
+    aligned = ((adf['price_slope'] > 0) & (adf['vol_slope'] > 0)) | \
+              ((adf['price_slope'] < 0) & (adf['vol_slope'] < 0))
+    aligned_count = int(aligned.sum())
+    valid_slope_days = int((adf['price_slope'].notna() & adf['vol_slope'].notna()).sum())
+    alignment_ratio = round(aligned_count / valid_slope_days, 2) if valid_slope_days > 0 else 0
+
+    # 1.3 持续性背离检测（连续3天以上价涨量缩/价跌量增）
+    adf['vol_vs_ma20'] = adf['volume'] > adf['ma20_vol']
+    adf['price_up'] = adf['pct_change'] > 0
+    adf['divergence'] = (
+        (adf['price_up'] & ~adf['vol_vs_ma20']) |   # 涨缩量
+        (~adf['price_up'] & adf['vol_vs_ma20'])      # 跌放量
+    )
+
+    divergences = []
+    streak = 0
+    streak_start = None
+    for idx, val in adf['divergence'].items():
+        if val:
+            if streak == 0:
+                streak_start = idx
+            streak += 1
+        else:
+            if streak >= 3:
+                t = "涨缩量" if adf.loc[streak_start, 'price_up'] else "跌放量"
+                divergences.append({
+                    "start": str(streak_start),
+                    "duration": streak,
+                    "type": t,
+                    "avg_price_chg": round(adf.loc[streak_start:idx].iloc[:streak]['pct_change'].mean(), 2)
+                })
+            streak = 0
+    if streak >= 3:
+        t = "涨缩量" if adf.loc[streak_start, 'price_up'] else "跌放量"
+        divergences.append({
+            "start": str(streak_start),
+            "duration": streak,
+            "type": t,
+            "avg_price_chg": round(adf.loc[streak_start:]['pct_change'].mean(), 2)
+        })
+
+    # 1.4 波段量能对比（上涨日 vs 下跌日的量能，非简单平均，带权重）
+    up_days = adf[adf['price_up']]
+    down_days = adf[~adf['price_up']]
+    up_vol_avg = float(up_days['volume'].mean()) if len(up_days) > 0 else 0
+    down_vol_avg = float(down_days['volume'].mean()) if len(down_days) > 0 else 0
+    up_vol_sum = float(up_days['volume'].sum()) if len(up_days) > 0 else 0
+    down_vol_sum = float(down_days['volume'].sum()) if len(down_days) > 0 else 0
+
+    # 1.5 量价相关系数（涨跌幅与成交量，而非价格与成交量）
+    vp_corr = None
+    if len(adf.dropna(subset=['pct_change', 'volume'])) >= 10:
+        vp_corr = round(float(adf['pct_change'].corr(adf['volume'])), 3)
+
+    # 全局定性
+    if healthy_pv_ratio > 0.6 and alignment_ratio > 0.6:
+        global_pattern = "全局量价配合良好，趋势与量能同步"
+    elif len(divergences) >= 2:
+        global_pattern = f"全局出现{len(divergences)}次持续性量价背离，趋势可信度低"
+    elif up_vol_avg > down_vol_avg * 1.5:
+        global_pattern = "上涨放量、下跌缩量，多头主导"
+    elif down_vol_avg > up_vol_avg * 1.5:
+        global_pattern = "下跌放量、上涨缩量，空头主导或派发阶段"
     else:
-        vol_trend_pct = 0
+        global_pattern = "全局量价关系中性，无明显主导力量"
+
+    # ========== 第二步：特殊单日识别 ==========
+    special_days = []
+    avg_vol_20 = float(df['ma20_vol'].iloc[-1])
+
+    for idx, row in adf.iterrows():
+        date_str = str(idx)
+        vr = row['vol_ratio']
+        if pd.isna(vr):
+            continue
+
+        is_huge = vr > 2.0
+        is_large = vr > 1.5 and (row['volume'] >= row['max_vol_20'] * 0.999)
+        is_shrink = vr < 0.5
+        is_tiny = vr < 0.3 and (row['volume'] <= row['min_vol_20'] * 1.001)
+
+        day_type = None
+        desc = None
+
+        # --- 巨量分类 ---
+        if is_huge or is_large:
+            # 突破型：放量+大阳线+创高/突破平台
+            if (row['body_pct'] > 2 or row['pct_change'] > 3) and row['is_yang'] and \
+               (row['is_new_high'] or row['close'] > row['platform_high_5']):
+                day_type = "巨量突破"
+                desc = f"放量{vr:.1f}倍，大阳线突破近期平台/高点，多头进攻"
+
+            # 天量天价/滞涨：放量+长上影+高位
+            elif row['upper_shadow'] > abs(row['body']) * 1.0 and row['is_new_high']:
+                day_type = "天量天价/滞涨"
+                desc = f"放量{vr:.1f}倍，创高但长上影({row['upper_shadow']:.2f})，高位抛压显现"
+
+            # 巨量下影吸筹：放量+长下影+拉起
+            elif row['lower_shadow'] > abs(row['body']) * 1.2 and row['close'] > row['low'] + (row['high']-row['low'])*0.6:
+                day_type = "巨量下影吸筹"
+                desc = f"放量{vr:.1f}倍，长下影({row['lower_shadow']:.2f})后拉起，恐慌盘涌出后被承接"
+
+            # 巨量恐慌：放量+大阴线+破低
+            elif (row['body_pct'] > 2 or row['pct_change'] < -3) and not row['is_yang'] and row['is_new_low']:
+                day_type = "巨量恐慌"
+                desc = f"放量{vr:.1f}倍，大阴线跌破近期低点，恐慌抛售"
+
+            # 巨量换手：放量+小实体
+            elif row['body_pct'] < 1.5:
+                day_type = "巨量换手"
+                desc = f"放量{vr:.1f}倍，实体极小，多空激烈博弈或主力对倒"
+
+            else:
+                day_type = "巨量异动"
+                desc = f"成交量异常放大{vr:.1f}倍，需结合位置判断"
+
+        # --- 缩量分类 ---
+        elif is_tiny or is_shrink:
+            # 缩量整理
+            if abs(row['pct_change']) < 1.5 and row['body_pct'] < 1.5:
+                day_type = "缩量整理"
+                desc = f"缩量至{vr:.1f}倍，波动极小，蓄势或无人问津"
+
+            # 缩量暴涨/惜售
+            elif row['pct_change'] > 3 and row['is_yang']:
+                day_type = "缩量暴涨/惜售"
+                desc = f"缩量至{vr:.1f}倍，大涨{row['pct_change']:.1f}%，筹码锁定良好，抛压轻"
+
+            # 缩量暴跌/流动性枯竭
+            elif row['pct_change'] < -3 and not row['is_yang']:
+                day_type = "缩量暴跌/流动性枯竭"
+                desc = f"缩量至{vr:.1f}倍，大跌{abs(row['pct_change']):.1f}%，无量空跌，无人接盘"
+
+            # 地量
+            elif row['volume'] <= row['min_vol_20'] * 1.001:
+                day_type = "地量"
+                desc = f"地量（{vr:.1f}倍20日均量），变盘前兆或极度低迷"
+
+            else:
+                day_type = "明显缩量"
+                desc = f"成交量明显萎缩至{vr:.1f}倍"
+
+        if day_type:
+            special_days.append({
+                "date": date_str,
+                "type": day_type,
+                "description": desc,
+                "volume_ratio": round(vr, 2),
+                "change_pct": round(row['pct_change'], 2),
+                "close": round(row['close'], 2)
+            })
+
+    # ========== 第三步：最近5日量能与量价演变 ==========
+    r5 = adf.tail(5).copy()
+    r5_list = []
+
+    for idx, row in r5.iterrows():
+        vr = row['vol_ratio'] if not pd.isna(row['vol_ratio']) else 1.0
+        chg = row['pct_change']
+        is_up = row['is_up']
+
+        # 精细分类
+        if is_up and vr > 1.5:
+            relation = "强上涨放量"
+        elif is_up and vr > 1.0:
+            relation = "温和上涨放量"
+        elif is_up and vr < 0.6:
+            relation = "上涨极度缩量"
+        elif is_up:
+            relation = "上涨平量"
+        elif not is_up and vr > 1.5:
+            relation = "强下跌放量"
+        elif not is_up and vr > 1.0:
+            relation = "温和下跌放量"
+        elif not is_up and vr < 0.6:
+            relation = "下跌极度缩量"
+        else:
+            relation = "下跌平量"
+
+        r5_list.append({
+            "date": str(idx),
+            "change_pct": round(chg, 2),
+            "volume_ratio": round(vr, 2),
+            "relation": relation
+        })
+
+    # 最近5日量能趋势（逐日环比）
+    vol_chgs = r5['volume'].pct_change().dropna() * 100
+    if len(vol_chgs) >= 3:
+        recent_3 = vol_chgs.tail(3).tolist()
+        if all(x > 5 for x in recent_3):
+            vol_trend = "量能连续递增，资金持续流入"
+        elif all(x < -5 for x in recent_3):
+            vol_trend = "量能连续递减，参与度降温"
+        elif vol_chgs.mean() > 20:
+            vol_trend = "整体显著放量"
+        elif vol_chgs.mean() < -20:
+            vol_trend = "整体显著缩量"
+        else:
+            vol_trend = "量能波动无序，无明显方向"
+    else:
         vol_trend = "数据不足"
 
-    # High-volume days (> 2x 20d avg)
-    high_vol_days = int((volume > avg_vol_20 * 2).sum()) if avg_vol_20 > 0 else 0
-
-    # Volume-price pattern interpretation
-    pattern = "未知"
-    if avg_up_vol > avg_down_vol * 1.3:
-        pattern = "量价配合良好（上涨放量、下跌缩量）"
-    elif avg_down_vol > avg_up_vol * 1.3:
-        pattern = "量价背离（下跌放量、上涨缩量，偏空）"
-    elif vol_ratio_5d and vol_ratio_5d > 1.5:
-        pattern = "近期明显放量"
-    elif vol_ratio_5d and vol_ratio_5d < 0.6:
-        pattern = "近期明显缩量"
+    # 最近5日量价质量
+    r5_up = r5[r5['is_up']]
+    r5_down = r5[~r5['is_up']]
+    if len(r5_up) >= 2 and len(r5_down) >= 1:
+        r5_up_vol = r5_up['volume'].mean()
+        r5_down_vol = r5_down['volume'].mean()
+        if r5_up_vol > r5_down_vol * 1.5:
+            r5_quality = "上涨放量、回调缩量，短期健康"
+        elif r5_up_vol < r5_down_vol * 0.7:
+            r5_quality = "上涨缩量、回调/下跌放量，短期背离"
+        else:
+            r5_quality = "短期量价关系中性"
     else:
-        pattern = "量价关系中性"
+        r5_quality = "涨跌样本不均，短期难以定性"
+
+    # 最近5日关键信号提取
+    r5_signals = [d for d in special_days if d['date'] in [str(i) for i in r5.index]]
+
+    # ========== 综合结论 ==========
+    parts = []
+    parts.append(f"【全局】{global_pattern}。健康量价同步率{healthy_pv_ratio*100:.0f}%，趋势-量能一致性{align_ratio*100:.0f}%。")
+    if divergences:
+        parts.append(f"期间出现{len(divergences)}次持续性量价背离（最长{divergences[-1]['duration']}天）。")
+    if special_days:
+        parts.append(f"【特殊日】共识别{len(special_days)}个异常量能日："
+                     f"{', '.join(list(dict.fromkeys([d['type'] for d in special_days]))[:5])}等。")
+    else:
+        parts.append("【特殊日】期间无显著异常量能日。")
+    parts.append(f"【近5日】{vol_trend}；{r5_quality}。"
+                 f"最新量能/20日均量={r5_list[-1]['volume_ratio']:.2f}倍。")
+    if r5_signals:
+        parts.append(f"近5日含{r5_signals[-1]['type']}（{r5_signals[-1]['date']}），需警惕。")
+
+    summary = "".join(parts)
 
     return {
         "code": stock_code,
         "source": source,
-        "period_days": len(df),
-        "latest_volume": latest_vol,
-        "avg_volume_5d": round(avg_vol_5, 0),
-        "avg_volume_20d": round(avg_vol_20, 0),
-        "volume_ratio_vs_5d": vol_ratio_5d,
-        "volume_ratio_vs_20d": vol_ratio_20d,
-        "avg_up_day_volume": round(avg_up_vol, 0),
-        "avg_down_day_volume": round(avg_down_vol, 0),
-        "volume_trend": vol_trend,
-        "volume_trend_pct": vol_trend_pct,
-        "high_volume_days": high_vol_days,
-        "volume_price_corr": vp_corr,
-        "pattern": pattern,
+        "period_days": len(adf),
+        "summary": summary,
+        "global": {
+            "pattern": global_pattern,
+            "healthy_sync_ratio": healthy_pv_ratio,
+            "trend_alignment_ratio": alignment_ratio,
+            "divergence_events": divergences,
+            "up_day_avg_volume": round(up_vol_avg, 0),
+            "down_day_avg_volume": round(down_vol_avg, 0),
+            "up_vs_down_vol_ratio": round(up_vol_avg / down_vol_avg, 2) if down_vol_avg > 0 else None,
+            "volume_price_corr": vp_corr
+        },
+        "special_days": {
+            "count": len(special_days),
+            "days": special_days
+        },
+        "recent_5": {
+            "daily": r5_list,
+            "vol_trend": vol_trend,
+            "pv_quality": r5_quality,
+            "special_signals_in_r5": r5_signals,
+            "latest_volume_ratio_vs_20d": round(float(r5['vol_ratio'].iloc[-1]), 2)
+        }
     }
 
 
 get_volume_analysis_tool = ToolDefinition(
     name="get_volume_analysis",
-    description="Analyse volume-price relationship for a stock. Returns volume ratios, "
-                "average volume on up vs down days, volume trend (expanding/shrinking), "
-                "and pattern interpretation (量价配合/背离). Useful for confirming trend "
-                "strength and detecting distribution or accumulation phases.",
+    description="分析股票的量价关系。返回量能比率、"
+                "上涨日 vs 下跌日的平均成交量、量能趋势（放大/萎缩），"
+                "以及量价形态解读（量价配合/背离）。用于确认趋势"
+                "强度和识别派发或吸筹阶段。",
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="Stock code, e.g., '600519'",
+            description="股票代码，例如 '600519'",
         ),
         ToolParameter(
             name="days",
             type="integer",
-            description="Number of recent trading days to analyse (default: 30)",
+            description="分析的最近交易天数（默认：30）",
             required=False,
             default=30,
         ),
@@ -490,20 +729,20 @@ def _handle_analyze_pattern(stock_code: str, days: int = 60) -> dict:
 
 analyze_pattern_tool = ToolDefinition(
     name="analyze_pattern",
-    description="Detect candlestick and chart patterns in recent price history. "
-                "Identifies: Doji, Hammer, Shooting Star, Morning/Evening Star, Engulfing, "
-                "Double Bottom, upward breakout, box oscillation, and more. "
-                "Returns pattern list with type (bullish/bearish/reversal) and strength.",
+    description="识别近期价格历史中的 K 线形态和图表形态。"
+                "可识别：十字星、锤子线、射击之星、晨星/暮星、吞没形态、"
+                "双底、向上突破、箱体震荡等。"
+                "返回形态列表，含类型（看多/看空/反转）和强度。",
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="Stock code, e.g., '600519'",
+            description="股票代码，例如 '600519'",
         ),
         ToolParameter(
             name="days",
             type="integer",
-            description="Number of recent trading days to scan (default: 60)",
+            description="扫描的最近交易天数（默认：60）",
             required=False,
             default=60,
         ),
@@ -626,20 +865,19 @@ def _handle_get_limit_up_down_stats(stock_code: str, days: int = 60) -> dict:
 
 get_limit_up_down_stats_tool = ToolDefinition(
     name="get_limit_up_down_stats",
-    description="Count limit-up, limit-down, failed limit-up (炸板), and max consecutive limit-up days "
-                "over the last N trading days. Automatically detects price limit rules: "
-                "STAR Market / ChiNext (20%), ST stocks (5%), normal A-shares (10%). "
-                "Returns momentum grade (S/A/B/C/F) aligned with SEPA criteria.",
+    description="统计最近 N 个交易日的涨停、跌停、炸板次数及最大连板天数。"
+                "自动识别涨跌停规则：科创板/创业板（20%）、ST 股（5%）、普通 A 股（10%）。"
+                "返回动量等级（S/A/B/C/F），与 SEPA 筛选标准对齐。",
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="Stock code, e.g., '600519'",
+            description="股票代码，例如 '600519'",
         ),
         ToolParameter(
             name="days",
             type="integer",
-            description="Number of recent trading days to scan (default: 60)",
+            description="统计的最近交易日数量（默认：60）",
             required=False,
             default=60,
         ),

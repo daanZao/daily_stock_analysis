@@ -87,6 +87,8 @@
 
 **存储表**：`stock_daily`
 
+> 注：`stock_daily` 除个股外，也存储 A 股主要指数的历史日线（如沪深300 `000300`），供 RS 相对强度、趋势对比等计算使用。指数数据通过 Tushare `index_daily` 接口获取，首次写入后由 `load_history_df` 自动缓存，不再重复走网络。
+
 ### 二、60分钟K线数据
 
 | 数据项 | 说明 | 来源 |
@@ -250,7 +252,7 @@ Efinance (P0) → Akshare (P1) → Pytdx (P2) → Baostock (P3) → Yfinance (P4
 |--------|----------|--------|----------|----------|----------|------------|-----------|------|
 | **Efinance** | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | 东财数据最全，易被封 |
 | **Akshare** | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | 免费稳定，接口丰富 |
-| **Tushare** | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | 需 Token，数据质量高 |
+| **Tushare** | ✅ | ❌ | ❌ | ✅(index_daily) | ❌ | ❌ | ❌ | 需 Token，数据质量高 |
 | **Pytdx** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | 通达信，内网可用 |
 | **Baostock** | ✅ | ✅(个股) | ❌ | ❌ | ❌ | ✅ | ✅ | 免费，需登录，有全市场列表 |
 | **Yfinance** | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | 美股/港股兜底 |
@@ -594,6 +596,7 @@ self.db.save_daily_data(df, code, source)
 from src.services.history_loader import load_history_df
 
 # 优先读 DB，不足时自动 fallback 到网络
+# fallback 成功后自动写入 stock_daily，后续读取即命中缓存
 df = load_history_df(stock_code, days=60)
 ```
 

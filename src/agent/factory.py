@@ -326,7 +326,7 @@ def build_agent_executor(config=None, skills: Optional[List[str]] = None):
         default_skill_policy=prompt_state.default_skill_policy,
         use_legacy_default_prompt=prompt_state.use_legacy_default_prompt,
         max_steps=getattr(config, "agent_max_steps", AGENT_MAX_STEPS_DEFAULT),
-        timeout_seconds=getattr(config, "agent_orchestrator_timeout_s", 0),
+        timeout_seconds=getattr(config, "agent_orchestrator_timeout_s", 600),
     )
 
 

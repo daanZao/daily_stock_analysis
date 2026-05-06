@@ -85,6 +85,8 @@ LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{mar
 
 ## 输出格式
 
+**你只允许输出一个纯 JSON 对象，禁止输出 Markdown 表格、阶段说明、分析过程或任何其他格式。JSON 前后不要有任何解释性文字。**
+
 最终响应必须是有效的 JSON 对象，必须包含以下顶层字段：
 
 - `stock_name`, `sentiment_score`, `trend_prediction`, `operation_advice`, `decision_type`, `confidence_level`
@@ -140,6 +142,8 @@ AGENT_SYSTEM_PROMPT = """你是一位{market_role}投资分析 Agent，拥有数
 {skills_section}
 
 ## 输出格式
+
+**你只允许输出一个纯 JSON 对象，禁止输出 Markdown 表格、阶段说明、分析过程或任何其他格式。JSON 前后不要有任何解释性文字。**
 
 最终响应必须是有效的 JSON 对象，必须包含以下顶层字段：
 
@@ -349,6 +353,90 @@ class AgentExecutor:
         ]
 
         return self._run_loop(messages, tool_decls, parse_dashboard=True)
+
+    def run_once(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+        """单次 LLM 调用，无工具交互，直接生成决策仪表盘。
+
+        适用于数据已在外部预取并格式化的场景（如 Pipeline 的 SEPA 分析路径），
+        避免 ReAct 循环带来的多次 LLM 调用和 prompt 膨胀。
+
+        Args:
+            task: 分析任务描述（如"请分析股票 600519"）。
+            context: 可选上下文字典。若包含 "formatted_data" 键，
+                     则直接使用其值作为 user message 主体，跳过 _build_user_message。
+
+        Returns:
+            AgentResult，其中 dashboard 为解析后的 JSON 字典。
+        """
+        # 1. 构建 system prompt（与 run() 一致）
+        skills_section = ""
+        if self.skill_instructions:
+            skills_section = f"## 激活的交易技能\n\n{self.skill_instructions}"
+        default_skill_policy_section = ""
+        if self.default_skill_policy:
+            default_skill_policy_section = f"\n{self.default_skill_policy}\n"
+        report_language = normalize_report_language((context or {}).get("report_language", "zh"))
+        stock_code = (context or {}).get("stock_code", "")
+        market_role = get_market_role(stock_code, report_language)
+        market_guidelines = get_market_guidelines(stock_code, report_language)
+        prompt_template = (
+            LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT
+            if self.use_legacy_default_prompt
+            else AGENT_SYSTEM_PROMPT
+        )
+        system_prompt = prompt_template.format(
+            market_role=market_role,
+            market_guidelines=market_guidelines,
+            default_skill_policy_section=default_skill_policy_section,
+            skills_section=skills_section,
+            language_section=_build_language_section(report_language),
+        )
+
+        # 2. 构建 user message
+        if context and context.get("formatted_data"):
+            # 数据已预取，强制 LLM 直接输出 JSON，禁止 Markdown/阶段说明
+            user_content = (
+                "【指令】所有分析数据已提供在下方，你不需要调用任何工具，也不允许输出分析过程、"
+                "Markdown 表格或阶段说明。你的唯一任务是直接基于这些数据生成一个有效的"
+                "决策仪表盘 JSON 对象。JSON 前后不要有任何额外文本，只输出纯 JSON。\n\n"
+                + context["formatted_data"]
+            )
+        else:
+            user_content = self._build_user_message(task, context)
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+        # 3. 单次 LLM 调用（无 tools）
+        # run_once 是单次调用，timeout 不宜过长；若未配置或超过 180s，限制为 180s
+        call_timeout = self.timeout_seconds
+        if call_timeout is None or call_timeout <= 0 or call_timeout > 180:
+            call_timeout = 180
+        response = self.llm_adapter.call_text(
+            messages,
+            timeout=call_timeout,
+        )
+
+        # 4. 解析结果
+        content = response.content or ""
+        dashboard = parse_dashboard_json(content)
+        usage = response.usage or {}
+        total_tokens = 0
+        if isinstance(usage, dict):
+            total_tokens = usage.get("total_tokens", 0) or usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+
+        return AgentResult(
+            success=dashboard is not None,
+            content=content,
+            dashboard=dashboard,
+            total_steps=1,
+            total_tokens=total_tokens,
+            provider=response.provider,
+            model=response.model,
+            error=None if dashboard else "Failed to parse dashboard JSON from single-turn response",
+        )
 
     def chat(self, message: str, session_id: str, progress_callback: Optional[Callable] = None, context: Optional[Dict[str, Any]] = None) -> AgentResult:
         """Execute the agent loop for a free-form chat message.

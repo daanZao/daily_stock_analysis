@@ -517,7 +517,7 @@ class HistoryService:
             dashboard = raw_result.get("dashboard", {})
 
             # Build AnalysisResult with available data
-            return AnalysisResult(
+            result = AnalysisResult(
                 code=raw_result.get("code", record.code),
                 name=raw_result.get("name", record.name),
                 sentiment_score=raw_result.get("sentiment_score", record.sentiment_score or 50),
@@ -553,9 +553,137 @@ class HistoryService:
                 change_pct=raw_result.get("change_pct"),
                 model_used=raw_result.get("model_used"),
             )
+            # Backfill empty flat fields from dashboard for legacy consumers
+            self._backfill_from_dashboard(result)
+            return result
         except Exception as e:
             logger.error(f"Failed to rebuild AnalysisResult: {e}", exc_info=True)
             return None
+
+    @staticmethod
+    def _backfill_from_dashboard(result: AnalysisResult) -> None:
+        """Backfill legacy flat fields from dashboard for downstream compatibility.
+
+        Agent mode stores analysis text inside dashboard.data_perspective as strings,
+        but downstream consumers (frontend / markdown generator) expect top-level
+        flat fields. This method bridges the two formats without touching the UI.
+        """
+        dashboard = result.dashboard
+        if not isinstance(dashboard, dict):
+            return
+
+        dp = dashboard.get("data_perspective", {})
+        if isinstance(dp, dict):
+            # trend_analysis: combine trend_status + price_position
+            if not result.trend_analysis:
+                parts = []
+                ts = dp.get("trend_status")
+                if ts:
+                    if isinstance(ts, dict):
+                        parts.append(f"趋势状态：{ts.get('ma_alignment', '')}")
+                    else:
+                        parts.append(f"趋势状态：{ts}")
+                pp = dp.get("price_position")
+                if pp:
+                    if isinstance(pp, dict):
+                        parts.append(f"价格位置：MA5偏离 {pp.get('bias_ma5', 'N/A')}%")
+                    else:
+                        parts.append(f"价格位置：{pp}")
+                result.trend_analysis = "\n".join(parts)
+            # volume_analysis
+            if not result.volume_analysis and dp.get("volume_analysis"):
+                va = dp["volume_analysis"]
+                if isinstance(va, dict):
+                    result.volume_analysis = va.get("volume_meaning", "")
+                else:
+                    result.volume_analysis = va
+            # technical_analysis: synthetic fallback
+            if not result.technical_analysis:
+                tech_parts = []
+                ts = dp.get("trend_status")
+                if ts:
+                    tech_parts.append(f"趋势：{ts}" if isinstance(ts, str) else f"趋势：{ts.get('ma_alignment', '')}")
+                va = dp.get("volume_analysis")
+                if va:
+                    tech_parts.append(f"量能：{va}" if isinstance(va, str) else f"量能：{va.get('volume_meaning', '')}")
+                cs = dp.get("chip_structure")
+                if cs:
+                    tech_parts.append(f"筹码：{cs}" if isinstance(cs, str) else f"筹码：{cs.get('profit_ratio', '')}")
+                result.technical_analysis = "\n".join(tech_parts)
+            # ma_analysis
+            if not result.ma_analysis:
+                ts = dp.get("trend_status")
+                if isinstance(ts, dict) and ts.get("ma_alignment"):
+                    result.ma_analysis = ts["ma_alignment"]
+
+        intel = dashboard.get("intelligence", {})
+        if isinstance(intel, dict):
+            if not result.news_summary and intel.get("latest_news"):
+                news = intel["latest_news"]
+                if isinstance(news, list) and news:
+                    result.news_summary = "\n".join(
+                        f"- {n.get('title', '') or n.get('content', '')}" for n in news[:5]
+                    )
+                elif isinstance(news, str):
+                    result.news_summary = news
+            if not result.market_sentiment and intel.get("sentiment_summary"):
+                result.market_sentiment = intel["sentiment_summary"]
+            if not result.fundamental_analysis and intel.get("earnings_outlook"):
+                result.fundamental_analysis = intel["earnings_outlook"]
+            if not result.company_highlights and intel.get("positive_catalysts"):
+                cats = intel["positive_catalysts"]
+                if isinstance(cats, list) and cats:
+                    result.company_highlights = "\n".join(
+                        f"- {c.get('catalyst', '') or c.get('content', '')}" for c in cats[:5]
+                    )
+                elif isinstance(cats, str):
+                    result.company_highlights = cats
+            if not result.hot_topics and intel.get("risk_alerts"):
+                alerts = intel["risk_alerts"]
+                if isinstance(alerts, list) and alerts:
+                    result.hot_topics = "\n".join(
+                        f"- {a.get('risk', '') or a.get('content', '')}" for a in alerts[:5]
+                    )
+                elif isinstance(alerts, str):
+                    result.hot_topics = alerts
+
+        core = dashboard.get("core_conclusion", {})
+        if isinstance(core, dict):
+            if not result.short_term_outlook and core.get("time_sensitivity"):
+                result.short_term_outlook = core["time_sensitivity"]
+            if not result.buy_reason and core.get("one_sentence"):
+                result.buy_reason = core["one_sentence"]
+            if not result.analysis_summary and core.get("one_sentence"):
+                result.analysis_summary = core["one_sentence"]
+            if not result.key_points and core.get("position_advice"):
+                pa = core["position_advice"]
+                if isinstance(pa, dict):
+                    parts = []
+                    if pa.get("no_position"):
+                        parts.append(f"空仓建议：{pa['no_position']}")
+                    if pa.get("has_position"):
+                        parts.append(f"持仓建议：{pa['has_position']}")
+                    result.key_points = "\n".join(parts)
+                elif isinstance(pa, str):
+                    result.key_points = pa
+
+        battle = dashboard.get("battle_plan", {})
+        if isinstance(battle, dict):
+            if not result.risk_warning:
+                checklist = battle.get("action_checklist", [])
+                if isinstance(checklist, list):
+                    risks = [c for c in checklist if isinstance(c, str) and "❌" in c]
+                    if risks:
+                        result.risk_warning = "\n".join(risks)
+                position = battle.get("position_strategy", {})
+                if isinstance(position, dict) and position.get("risk_control"):
+                    result.risk_warning = position["risk_control"]
+            if not result.pattern_analysis and battle.get("action_checklist"):
+                checklist = battle.get("action_checklist", [])
+                if isinstance(checklist, list):
+                    items = [c for c in checklist if isinstance(c, str)]
+                    if items:
+                        result.pattern_analysis = "\n".join(f"- {i}" for i in items[:5])
 
     def _generate_single_stock_markdown(
         self,
@@ -608,7 +736,7 @@ class HistoryService:
 
         # ========== 舆情与基本面概览（放在最前面）==========
         intel = dashboard.get('intelligence', {}) if dashboard else {}
-        if intel:
+        if isinstance(intel, dict) and intel:
             report_lines.extend([
                 f"### 📰 {labels['info_heading']}",
                 "",
@@ -625,22 +753,55 @@ class HistoryService:
                 report_lines.append("")
                 report_lines.append(f"**🚨 {labels['risk_alerts_label']}**:")
                 for alert in risk_alerts:
-                    report_lines.append(f"- {alert}")
+                    if isinstance(alert, dict):
+                        # Handle dict format: extract severity and risk text
+                        severity = alert.get('severity', '')
+                        risk_text = alert.get('risk', '') or alert.get('content', '')
+                        date_info = alert.get('date', '')
+                        parts = [p for p in (severity, risk_text, date_info) if p]
+                        report_lines.append(f"- {' | '.join(parts)}")
+                    else:
+                        report_lines.append(f"- {alert}")
             # 利好催化
             catalysts = intel.get('positive_catalysts', [])
             if catalysts:
                 report_lines.append("")
                 report_lines.append(f"**✨ {labels['positive_catalysts_label']}**:")
                 for cat in catalysts:
-                    report_lines.append(f"- {cat}")
+                    if isinstance(cat, dict):
+                        # Handle dict format: extract type and catalyst text
+                        cat_type = cat.get('type', '')
+                        cat_text = cat.get('catalyst', '') or cat.get('content', '')
+                        date_info = cat.get('date', '')
+                        parts = [p for p in (cat_type, cat_text, date_info) if p]
+                        report_lines.append(f"- {' | '.join(parts)}")
+                    else:
+                        report_lines.append(f"- {cat}")
             # 最新消息
-            if intel.get('latest_news'):
+            latest_news = intel.get('latest_news')
+            if latest_news:
                 report_lines.append("")
-                report_lines.append(f"**📢 {labels['latest_news_label']}**: {intel['latest_news']}")
+                if isinstance(latest_news, list):
+                    # Handle list of dicts format
+                    news_texts = []
+                    for news in latest_news:
+                        if isinstance(news, dict):
+                            title = news.get('title', '') or news.get('content', '')
+                            source = news.get('source', '')
+                            date_info = news.get('date', '')
+                            parts = [p for p in (title, source, date_info) if p]
+                            news_texts.append(' | '.join(parts))
+                        else:
+                            news_texts.append(str(news))
+                    report_lines.append(f"**📢 {labels['latest_news_label']}**: {'; '.join(news_texts)}")
+                else:
+                    report_lines.append(f"**📢 {labels['latest_news_label']}**: {latest_news}")
             report_lines.append("")
 
         # ========== 核心结论 ==========
         core = dashboard.get('core_conclusion', {}) if dashboard else {}
+        if not isinstance(core, dict):
+            core = {}
         one_sentence = core.get('one_sentence', result.analysis_summary)
         time_sense = core.get('time_sensitivity', labels['default_time_sensitivity'])
         pos_advice = core.get('position_advice', {})
@@ -657,20 +818,26 @@ class HistoryService:
         ])
         # 持仓分类建议
         if pos_advice:
-            report_lines.extend([
-                f"| {labels['position_status_label']} | {labels['action_advice_label']} |",
-                "|---------|---------|",
-                f"| 🆕 **{labels['no_position_label']}** | {pos_advice.get('no_position', localize_operation_advice(result.operation_advice, report_language))} |",
-                f"| 💼 **{labels['has_position_label']}** | {pos_advice.get('has_position', labels['continue_holding'])} |",
-                "",
-            ])
+            if isinstance(pos_advice, dict):
+                report_lines.extend([
+                    f"| {labels['position_status_label']} | {labels['action_advice_label']} |",
+                    "|---------|---------|",
+                    f"| 🆕 **{labels['no_position_label']}** | {pos_advice.get('no_position', localize_operation_advice(result.operation_advice, report_language))} |",
+                    f"| 💼 **{labels['has_position_label']}** | {pos_advice.get('has_position', labels['continue_holding'])} |",
+                    "",
+                ])
+            elif isinstance(pos_advice, str):
+                report_lines.extend([
+                    f"**{labels['position_status_label']}**: {pos_advice}",
+                    "",
+                ])
 
         # ========== 行情快照 ==========
         self._append_market_snapshot_to_report(report_lines, result, labels)
 
         # ========== 数据透视 ==========
         data_persp = dashboard.get('data_perspective', {}) if dashboard else {}
-        if data_persp:
+        if isinstance(data_persp, dict):
             trend_data = data_persp.get('trend_status', {})
             price_data = data_persp.get('price_position', {})
             vol_data = data_persp.get('volume_analysis', {})
@@ -680,85 +847,110 @@ class HistoryService:
                 f"### 📊 {labels['data_perspective_heading']}",
                 "",
             ])
-            # 趋势状态
+            # 趋势状态 (支持 dict 和 string 两种格式)
             if trend_data:
-                is_bullish = (
-                    f"✅ {labels['yes_label']}"
-                    if trend_data.get('is_bullish', False)
-                    else f"❌ {labels['no_label']}"
-                )
-                report_lines.extend([
-                    f"**{labels['ma_alignment_label']}**: {trend_data.get('ma_alignment', 'N/A')} | "
-                    f"{labels['bullish_alignment_label']}: {is_bullish} | "
-                    f"{labels['trend_strength_label']}: {trend_data.get('trend_score', 'N/A')}/100",
-                    "",
-                ])
-            # 价格位置
-            if price_data:
-                raw_bias_status = price_data.get('bias_status', 'N/A')
-                bias_status = localize_bias_status(raw_bias_status, report_language)
-                bias_emoji = get_bias_status_emoji(raw_bias_status)
-                report_lines.extend([
-                    f"| {labels['price_metrics_label']} | {labels['current_price_label']} |",
-                    "|---------|------|",
-                    f"| {labels['current_price_label']} | {price_data.get('current_price', 'N/A')} |",
-                    f"| {labels['ma5_label']} | {price_data.get('ma5', 'N/A')} |",
-                    f"| {labels['ma10_label']} | {price_data.get('ma10', 'N/A')} |",
-                    f"| {labels['ma20_label']} | {price_data.get('ma20', 'N/A')} |",
-                    f"| {labels['bias_ma5_label']} | {price_data.get('bias_ma5', 'N/A')}% {bias_emoji}{bias_status} |",
-                    f"| {labels['support_level_label']} | {price_data.get('support_level', 'N/A')} |",
-                    f"| {labels['resistance_level_label']} | {price_data.get('resistance_level', 'N/A')} |",
-                    "",
-                ])
-            # 量能分析
-            if vol_data:
-                report_lines.extend([
-                    f"**{labels['volume_label']}**: {labels['volume_ratio_label']} {vol_data.get('volume_ratio', 'N/A')} "
-                    f"({vol_data.get('volume_status', '')}) | {labels['turnover_rate_label']} {vol_data.get('turnover_rate', 'N/A')}%",
-                    f"💡 *{vol_data.get('volume_meaning', '')}*",
-                    "",
-                ])
-            # 筹码结构
-            if chip_data:
-                raw_chip_health = chip_data.get('chip_health', 'N/A')
-                chip_health = localize_chip_health(raw_chip_health, report_language)
-                normalized_chip_health = str(raw_chip_health or "").strip().lower()
-                if normalized_chip_health in {"健康", "healthy"}:
-                    chip_emoji = "✅"
-                elif normalized_chip_health in {"一般", "average"}:
-                    chip_emoji = "⚠️"
+                if isinstance(trend_data, str):
+                    report_lines.append(f"**{labels['ma_alignment_label']}**: {trend_data}")
+                    report_lines.append("")
                 else:
-                    chip_emoji = "🚨"
-                report_lines.extend([
-                    f"**{labels['chip_label']}**: {chip_data.get('profit_ratio', 'N/A')} | {chip_data.get('avg_cost', 'N/A')} | "
-                    f"{chip_data.get('concentration', 'N/A')} {chip_emoji}{chip_health}",
-                    "",
-                ])
+                    is_bullish = (
+                        f"✅ {labels['yes_label']}"
+                        if trend_data.get('is_bullish', False)
+                        else f"❌ {labels['no_label']}"
+                    )
+                    report_lines.extend([
+                        f"**{labels['ma_alignment_label']}**: {trend_data.get('ma_alignment', 'N/A')} | "
+                        f"{labels['bullish_alignment_label']}: {is_bullish} | "
+                        f"{labels['trend_strength_label']}: {trend_data.get('trend_score', 'N/A')}/100",
+                        "",
+                    ])
+            # 价格位置 (支持 dict 和 string 两种格式)
+            if price_data:
+                if isinstance(price_data, str):
+                    report_lines.append(f"**{labels['price_metrics_label']}**: {price_data}")
+                    report_lines.append("")
+                else:
+                    raw_bias_status = price_data.get('bias_status', 'N/A')
+                    bias_status = localize_bias_status(raw_bias_status, report_language)
+                    bias_emoji = get_bias_status_emoji(raw_bias_status)
+                    report_lines.extend([
+                        f"| {labels['price_metrics_label']} | {labels['current_price_label']} |",
+                        "|---------|------|",
+                        f"| {labels['current_price_label']} | {price_data.get('current_price', 'N/A')} |",
+                        f"| {labels['ma5_label']} | {price_data.get('ma5', 'N/A')} |",
+                        f"| {labels['ma10_label']} | {price_data.get('ma10', 'N/A')} |",
+                        f"| {labels['ma20_label']} | {price_data.get('ma20', 'N/A')} |",
+                        f"| {labels['bias_ma5_label']} | {price_data.get('bias_ma5', 'N/A')}% {bias_emoji}{bias_status} |",
+                        f"| {labels['support_level_label']} | {price_data.get('support_level', 'N/A')} |",
+                        f"| {labels['resistance_level_label']} | {price_data.get('resistance_level', 'N/A')} |",
+                        "",
+                    ])
+            # 量能分析 (支持 dict 和 string 两种格式)
+            if vol_data:
+                if isinstance(vol_data, str):
+                    report_lines.append(f"**{labels['volume_label']}**: {vol_data}")
+                    report_lines.append("")
+                else:
+                    report_lines.extend([
+                        f"**{labels['volume_label']}**: {labels['volume_ratio_label']} {vol_data.get('volume_ratio', 'N/A')} "
+                        f"({vol_data.get('volume_status', '')}) | {labels['turnover_rate_label']} {vol_data.get('turnover_rate', 'N/A')}%",
+                        f"💡 *{vol_data.get('volume_meaning', '')}*",
+                        "",
+                    ])
+            # 筹码结构 (支持 dict 和 string 两种格式)
+            if chip_data:
+                if isinstance(chip_data, str):
+                    report_lines.append(f"**{labels['chip_label']}**: {chip_data}")
+                    report_lines.append("")
+                else:
+                    raw_chip_health = chip_data.get('chip_health', 'N/A')
+                    chip_health = localize_chip_health(raw_chip_health, report_language)
+                    normalized_chip_health = str(raw_chip_health or "").strip().lower()
+                    if normalized_chip_health in {"健康", "healthy"}:
+                        chip_emoji = "✅"
+                    elif normalized_chip_health in {"一般", "average"}:
+                        chip_emoji = "⚠️"
+                    else:
+                        chip_emoji = "🚨"
+                    report_lines.extend([
+                        f"**{labels['chip_label']}**: {chip_data.get('profit_ratio', 'N/A')} | {chip_data.get('avg_cost', 'N/A')} | "
+                        f"{chip_data.get('concentration', 'N/A')} {chip_emoji}{chip_health}",
+                        "",
+                    ])
 
         # ========== 作战计划 ==========
         battle = dashboard.get('battle_plan', {}) if dashboard else {}
-        if battle:
+        if isinstance(battle, dict):
             report_lines.extend([
                 f"### 🎯 {labels['battle_plan_heading']}",
                 "",
             ])
-            # 狙击点位
+            # 狙击点位 (兼容 ideal_buy/secondary_buy 和 aggressive_entry/conservative_entry 两种格式)
             sniper = battle.get('sniper_points', {})
-            if sniper:
+            if isinstance(sniper, dict):
+                # 自动映射两种键名格式
+                ideal_buy = sniper.get('ideal_buy') or sniper.get('aggressive_entry')
+                secondary_buy = sniper.get('secondary_buy') or sniper.get('conservative_entry')
+                stop_loss = sniper.get('stop_loss')
+                take_profit = sniper.get('take_profit')
+                # 根据实际存在的键决定显示标签
+                has_legacy_keys = sniper.get('ideal_buy') is not None or sniper.get('secondary_buy') is not None
+                ideal_label = labels['ideal_buy_label'] if has_legacy_keys else labels.get('aggressive_entry_label', '激进买点')
+                secondary_label = labels['secondary_buy_label'] if has_legacy_keys else labels.get('conservative_entry_label', '保守买点')
                 report_lines.extend([
                     f"**📍 {labels['action_points_heading']}**",
                     "",
                     f"| {labels['action_points_heading']} | {labels['current_price_label']} |",
                     "|---------|------|",
-                    f"| 🎯 {labels['ideal_buy_label']} | {self._clean_sniper_value(sniper.get('ideal_buy', 'N/A'))} |",
-                    f"| 🔵 {labels['secondary_buy_label']} | {self._clean_sniper_value(sniper.get('secondary_buy', 'N/A'))} |",
-                    f"| 🛑 {labels['stop_loss_label']} | {self._clean_sniper_value(sniper.get('stop_loss', 'N/A'))} |",
-                    f"| 🎊 {labels['take_profit_label']} | {self._clean_sniper_value(sniper.get('take_profit', 'N/A'))} |",
+                    f"| 🎯 {ideal_label} | {self._clean_sniper_value(ideal_buy or 'N/A')} |",
+                    f"| 🔵 {secondary_label} | {self._clean_sniper_value(secondary_buy or 'N/A')} |",
+                    f"| 🛑 {labels['stop_loss_label']} | {self._clean_sniper_value(stop_loss or 'N/A')} |",
+                    f"| 🎊 {labels['take_profit_label']} | {self._clean_sniper_value(take_profit or 'N/A')} |",
                     "",
                 ])
             # 仓位策略
             position = battle.get('position_strategy', {})
-            if position:
+            if isinstance(position, dict):
                 report_lines.extend([
                     f"**💰 {labels['suggested_position_label']}**: {position.get('suggested_position', 'N/A')}",
                     f"- {labels['entry_plan_label']}: {position.get('entry_plan', 'N/A')}",
@@ -767,13 +959,20 @@ class HistoryService:
                 ])
             # 检查清单
             checklist = battle.get('action_checklist', []) if battle else []
-            if checklist:
+            if checklist and isinstance(checklist, list):
                 report_lines.extend([
                     f"**✅ {labels['checklist_heading']}**",
                     "",
                 ])
                 for item in checklist:
-                    report_lines.append(f"- {item}")
+                    if isinstance(item, dict):
+                        # Handle dict format checklist items
+                        desc = item.get('description', '') or item.get('item', '') or item.get('text', '')
+                        status = item.get('status', '')
+                        parts = [p for p in (status, desc) if p]
+                        report_lines.append(f"- {' | '.join(parts)}")
+                    else:
+                        report_lines.append(f"- {item}")
                 report_lines.append("")
 
         # ========== 如果没有 dashboard，显示传统格式 ==========
