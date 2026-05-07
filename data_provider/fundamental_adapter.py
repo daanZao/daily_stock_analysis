@@ -289,6 +289,129 @@ class AkshareFundamentalAdapter:
                 continue
         return None, None, errors
 
+    def _fetch_from_baostock(self, stock_code: str) -> Dict[str, Any]:
+        """Baostock fallback for fundamental data when AkShare fails."""
+        result = {"growth": {}, "earnings": {}, "errors": []}
+        try:
+            import baostock as bs
+        except Exception as exc:
+            result["errors"].append(f"baostock_import:{type(exc).__name__}")
+            return result
+
+        code = stock_code.strip().replace('.SH', '').replace('.SZ', '').replace('.sh', '').replace('.sz', '')
+        if code.startswith(('600', '601', '603', '688')):
+            bs_code = f"sh.{code}"
+        elif code.startswith(('000', '002', '300')):
+            bs_code = f"sz.{code}"
+        else:
+            bs_code = f"sz.{code}"
+
+        try:
+            lg = bs.login()
+            if lg.error_code != '0':
+                result["errors"].append(f"baostock_login:{lg.error_msg}")
+                return result
+        except Exception as exc:
+            result["errors"].append(f"baostock_login:{type(exc).__name__}")
+            return result
+
+        try:
+            from datetime import date
+            now = date.today()
+            year = now.year
+            quarter = (now.month - 1) // 3 + 1
+
+            profit_data = None
+            growth_data = None
+
+            for _ in range(4):
+                if profit_data is None:
+                    try:
+                        rs = bs.query_profit_data(code=bs_code, year=year, quarter=quarter)
+                        if rs.error_code == '0':
+                            data_list = []
+                            while rs.next():
+                                data_list.append(rs.get_row_data())
+                            if data_list:
+                                profit_data = dict(zip(rs.fields, data_list[0]))
+                    except Exception as exc:
+                        result["errors"].append(f"baostock_profit_{year}Q{quarter}:{type(exc).__name__}")
+
+                if growth_data is None:
+                    try:
+                        rs = bs.query_growth_data(code=bs_code, year=year, quarter=quarter)
+                        if rs.error_code == '0':
+                            data_list = []
+                            while rs.next():
+                                data_list.append(rs.get_row_data())
+                            if data_list:
+                                growth_data = dict(zip(rs.fields, data_list[0]))
+                    except Exception as exc:
+                        result["errors"].append(f"baostock_growth_{year}Q{quarter}:{type(exc).__name__}")
+
+                if profit_data or growth_data:
+                    break
+
+                quarter -= 1
+                if quarter <= 0:
+                    quarter = 4
+                    year -= 1
+
+            if profit_data or growth_data:
+                def _safe_float_bs(val):
+                    if val is None or val == '':
+                        return None
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        return None
+
+                roe = _safe_float_bs(profit_data.get('roeAvg')) if profit_data else None
+                gp_margin = _safe_float_bs(profit_data.get('gpMargin')) if profit_data else None
+                net_profit = _safe_float_bs(profit_data.get('netProfit')) if profit_data else None
+                stat_date = profit_data.get('statDate') if profit_data else None
+                net_profit_yoy = _safe_float_bs(growth_data.get('YOYNI')) if growth_data else None
+
+                result["growth"] = {
+                    "revenue_yoy": None,
+                    "net_profit_yoy": net_profit_yoy,
+                    "roe": roe,
+                    "gross_margin": gp_margin,
+                }
+                financial_report = {
+                    "report_date": stat_date,
+                    "revenue": None,
+                    "net_profit_parent": net_profit,
+                    "operating_cash_flow": None,
+                    "roe": roe,
+                }
+                if any(v is not None for v in financial_report.values()):
+                    result["earnings"]["financial_report"] = financial_report
+
+            # Try forecast report
+            try:
+                start_date = f"{now.year - 1}-01-01"
+                end_date = now.isoformat()
+                rs = bs.query_forecast_report(code=bs_code, start_date=start_date, end_date=end_date)
+                if rs.error_code == '0':
+                    data_list = []
+                    while rs.next():
+                        data_list.append(rs.get_row_data())
+                    if data_list:
+                        forecast = dict(zip(rs.fields, data_list[0]))
+                        abstract = forecast.get('profitForcastAbstract', '')
+                        if abstract:
+                            result["earnings"]["forecast_summary"] = str(abstract)[:200]
+            except Exception as exc:
+                result["errors"].append(f"baostock_forecast:{type(exc).__name__}")
+        finally:
+            try:
+                bs.logout()
+            except Exception:
+                pass
+
+        return result
+
     def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
         """
         Return normalized fundamental blocks from AkShare with partial tolerance.
@@ -338,6 +461,14 @@ class AkshareFundamentalAdapter:
                 if any(v is not None for v in financial_report_payload.values()):
                     result["earnings"]["financial_report"] = financial_report_payload
                 result["source_chain"].append(f"growth:{fin_source}")
+        else:
+            # Fallback to Baostock when AkShare financial indicators fail
+            bs_result = self._fetch_from_baostock(stock_code)
+            if bs_result.get("growth") or bs_result.get("earnings"):
+                result["growth"] = bs_result.get("growth", {})
+                result["earnings"].update(bs_result.get("earnings", {}))
+                result["source_chain"].append("growth:baostock_fallback")
+            result["errors"].extend(bs_result.get("errors", []))
 
         # Earnings forecast
         forecast_df, forecast_source, forecast_errors = self._call_df_candidates([

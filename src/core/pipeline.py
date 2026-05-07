@@ -453,15 +453,19 @@ class StockAnalysisPipeline:
                 }
             
             # Step 6: 增强上下文数据（添加实时行情、筹码、趋势分析结果、股票名称）
-            enhanced_context = self._enhance_context(
-                context, 
-                realtime_quote, 
+            # 含 SEPA 数据质量门禁，最多 3 次重试
+            enhanced_context, failure_result = self._enhance_context_with_sepa_quality_gate(
+                context,
+                realtime_quote,
                 chip_data,
                 trend_result,
-                stock_name,  # 传入股票名称
+                stock_name,
                 fundamental_context,
             )
-            
+            if failure_result is not None:
+                failure_result.query_id = query_id
+                return failure_result
+
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             llm_progress_state = {"last_progress": 64}
 
@@ -526,7 +530,131 @@ class StockAnalysisPipeline:
             logger.error(f"{stock_name}({code}) 分析失败: {e}")
             logger.exception(f"{stock_name}({code}) 详细错误信息:")
             return None
-    
+
+    # ------------------------------------------------------------------
+    # SEPA 数据质量门禁
+    # ------------------------------------------------------------------
+
+    def _validate_sepa_data_quality(
+        self,
+        enhanced_context: Dict[str, Any],
+        fundamental_context: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str]:
+        """验证 SEPA 分析所需的核心数据是否完整。
+
+        Returns:
+            (is_valid, error_message)
+        """
+        code = enhanced_context.get('code', '')
+        today = enhanced_context.get('today', {})
+        sepa = enhanced_context.get('sepa_analysis', {})
+
+        # 1. 检查历史日线基础字段
+        required_fields = ['close', 'volume', 'high', 'low', 'open']
+        missing = [f for f in required_fields if today.get(f) is None]
+        if missing:
+            return False, f"历史日线数据缺失字段: {', '.join(missing)}"
+
+        # 2. 检查均线数据
+        for ma in ['ma50', 'ma150', 'ma200']:
+            val = sepa.get(ma)
+            if val is None or val <= 0:
+                return False, f"均线数据缺失: {ma}={val}"
+
+        # 3. 检查季度业绩数据（最少 1 个季度）
+        financial_reports = enhanced_context.get('financial_reports', [])
+        has_fr = bool(financial_reports and len(financial_reports) >= 1)
+
+        # 备选：检查 fundamental_context 中的 earnings
+        has_fundamental_earnings = False
+        if fundamental_context:
+            earnings = fundamental_context.get('earnings')
+            if earnings and isinstance(earnings, dict):
+                # earnings 结构: {financial_report: {...}, forecast_summary: str, quick_report_summary: str, dividend: {...}}
+                # 只要任一子块有值就算有效
+                for k, v in earnings.items():
+                    if v is None:
+                        continue
+                    if isinstance(v, dict) and any(vv is not None for vv in v.values()):
+                        has_fundamental_earnings = True
+                        break
+                    if isinstance(v, str) and v.strip():
+                        has_fundamental_earnings = True
+                        break
+
+        if has_fr or has_fundamental_earnings:
+            return True, ""
+
+        if not has_fr and not has_fundamental_earnings:
+            return (
+                False,
+                "季度业绩数据缺失: FinancialReport 表无记录且 fundamental_context.earnings 为空"
+            )
+        if not has_fr:
+            return False, "季度业绩数据缺失: FinancialReport 表无记录"
+        return False, "季度业绩数据缺失: fundamental_context.earnings 为空"
+
+    def _invalidate_stock_history_cache(self, code: str) -> None:
+        """清除股票历史日线 DB 缓存，强制下次从网络重新获取。"""
+        try:
+            with self.db.get_session() as session:
+                from sqlalchemy import delete
+                from src.storage import StockDaily
+                result = session.execute(
+                    delete(StockDaily).where(StockDaily.code == code)
+                )
+                session.commit()
+                logger.info(
+                    f"[{code}] 已清除 {result.rowcount} 条历史日线缓存，下次将从网络重新获取"
+                )
+        except Exception as e:
+            logger.warning(f"[{code}] 清除历史缓存失败: {e}")
+
+    def _enhance_context_with_sepa_quality_gate(
+        self,
+        context: Dict[str, Any],
+        realtime_quote,
+        chip_data: Optional[ChipDistribution],
+        trend_result: Optional[TrendAnalysisResult],
+        stock_name: str,
+        fundamental_context: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Dict[str, Any], Optional[AnalysisResult]]:
+        """增强上下文并执行 SEPA 数据质量门禁（含最多 3 次重试）。
+
+        Returns:
+            (enhanced_context, failure_result) — 如果 failure_result 不为 None，
+            表示数据质量未通过，应直接返回该结果而不调用 LLM。
+        """
+        code = context.get('code', '')
+        for attempt in range(1, 4):
+            enhanced = self._enhance_context(
+                context, realtime_quote, chip_data, trend_result, stock_name, fundamental_context
+            )
+            is_valid, error_msg = self._validate_sepa_data_quality(enhanced, fundamental_context)
+            if is_valid:
+                return enhanced, None
+
+            if attempt < 3:
+                logger.warning(
+                    f"[{code}] SEPA 数据质量检查未通过（第 {attempt}/3 次）: {error_msg}，清除缓存重试..."
+                )
+                self._invalidate_stock_history_cache(code)
+            else:
+                logger.error(
+                    f"[{code}] SEPA 数据质量检查未通过（第 3/3 次）: {error_msg}，放弃分析"
+                )
+                return enhanced, AnalysisResult(
+                    code=code,
+                    name=stock_name or code,
+                    sentiment_score=0,
+                    trend_prediction="数据不足",
+                    operation_advice="观望",
+                    success=False,
+                    error_message=f"SEPA 数据质量未通过: {error_msg}",
+                )
+        # unreachable
+        return enhanced, None  # type: ignore[return-value]
+
     def _enhance_context(
         self,
         context: Dict[str, Any],
@@ -874,7 +1002,8 @@ class StockAnalysisPipeline:
                 }
 
             # 2. 增强上下文数据（添加实时行情、筹码、趋势分析结果、SEPA 数据等）
-            enhanced_context = self._enhance_context(
+            # 含 SEPA 数据质量门禁，最多 3 次重试
+            enhanced_context, failure_result = self._enhance_context_with_sepa_quality_gate(
                 context,
                 realtime_quote,
                 chip_data,
@@ -882,6 +1011,9 @@ class StockAnalysisPipeline:
                 stock_name,
                 fundamental_context,
             )
+            if failure_result is not None:
+                failure_result.query_id = query_id
+                return failure_result
 
             # 3. 获取新闻情报（预取，避免 Agent 工具重复搜索）
             news_context = None

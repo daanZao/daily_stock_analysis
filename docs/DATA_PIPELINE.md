@@ -118,11 +118,19 @@
 
 | 数据项 | 说明 | 来源 |
 |--------|------|------|
-| **财报表** | 营收、净利润、毛利率、ROE、EPS 等季度指标 | AkShare（主源） |
-| **成长能力** | 营收同比、净利同比、净资产同比 | baostock `query_growth_data` |
-| **业绩预告** | 预增/预减/扭亏/预亏及净利润变动区间 | baostock `query_forecast_report` |
+| **财报表** | 营收、净利润、毛利率、ROE、EPS 等季度指标 | AkShare（主源）→ Baostock fallback |
+| **成长能力** | 营收同比、净利同比、净资产同比 | AkShare（主源）→ Baostock `query_growth_data` fallback |
+| **业绩预告** | 预增/预减/扭亏/预亏及净利润变动区间 | AkShare（主源）→ Baostock `query_forecast_report` fallback |
 
 **存储表**：`financial_report`, `earnings_forecast`
+
+**多源 fallback 机制**：
+`AkshareFundamentalAdapter` 内部优先尝试 AkShare 的多个接口候选（`stock_financial_abstract`、`stock_financial_analysis_indicator` 等）。当 AkShare 全部失败时，自动 fallback 到 Baostock：
+- `query_profit_data` → ROE、毛利率、净利率、净利润
+- `query_growth_data` → 净利润同比增长率
+- `query_forecast_report` → 业绩预告摘要
+
+Baostock fallback 的数据会回写到 `fundamental_context.earnings`，供 Pipeline SEPA 数据质量门禁和 LLM prompt 使用。
 
 **注意**：`query_forecast_report` 并非所有公司都有数据（蓝筹通常不发预告），入库和 prompt 注入时均做空值兜底。
 
@@ -254,7 +262,7 @@ Efinance (P0) → Akshare (P1) → Pytdx (P2) → Baostock (P3) → Yfinance (P4
 | **Akshare** | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | 免费稳定，接口丰富 |
 | **Tushare** | ✅ | ❌ | ❌ | ✅(index_daily) | ❌ | ❌ | ❌ | 需 Token，数据质量高 |
 | **Pytdx** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | 通达信，内网可用 |
-| **Baostock** | ✅ | ✅(个股) | ❌ | ❌ | ❌ | ✅ | ✅ | 免费，需登录，有全市场列表 |
+| **Baostock** | ✅ | ✅(个股) | ❌ | ❌ | ❌ | ✅ | ✅(fallback) | 免费，需登录，有全市场列表；基本面数据作为 AkShare 失败后的 fallback |
 | **Yfinance** | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | 美股/港股兜底 |
 | **TickFlow** | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | 指数增强（可选） |
 
@@ -705,6 +713,7 @@ REALTIME_SOURCE_PRIORITY=tencent,akshare_sina,efinance,akshare_em
 | `data_provider/base.py` | `DataFetcherManager` 策略管理器、技术指标预计算 |
 | `data_provider/akshare_fetcher.py` | Akshare 数据源（指数、板块、市场统计、财报） |
 | `data_provider/baostock_fetcher.py` | Baostock 数据源（个股日线、60分钟K线、成长能力、业绩预告、全市场证券列表） |
+| `data_provider/fundamental_adapter.py` | AkShare 基本面数据适配器（财报、成长、分红、机构、资金流向），含 Baostock fallback |
 | `data_provider/efinance_fetcher.py` | Efinance 数据源（个股日线、实时行情） |
 | `src/core/pipeline.py` | 个股分析主流程（含断点续传） |
 | `src/core/market_data_sync.py` | 收盘市场数据同步 |

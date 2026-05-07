@@ -513,45 +513,51 @@ class HistoryService:
         """
         try:
             from src.analyzer import AnalysisResult
+            # Filter out None values so dict.get defaults work correctly.
+            # When LLM returns a field as null, raw_result contains the key
+            # with None value; dict.get(key, default) would return None
+            # instead of the fallback, breaking AnalysisResult construction.
+            clean_raw = {k: v for k, v in raw_result.items() if v is not None}
+
             # Extract dashboard data if available
-            dashboard = raw_result.get("dashboard", {})
+            dashboard = clean_raw.get("dashboard", {})
 
             # Build AnalysisResult with available data
             result = AnalysisResult(
-                code=raw_result.get("code", record.code),
-                name=raw_result.get("name", record.name),
-                sentiment_score=raw_result.get("sentiment_score", record.sentiment_score or 50),
-                trend_prediction=raw_result.get("trend_prediction", record.trend_prediction or ""),
-                operation_advice=raw_result.get("operation_advice", record.operation_advice or ""),
-                decision_type=raw_result.get("decision_type", "hold"),
-                confidence_level=raw_result.get("confidence_level", "中"),
-                report_language=normalize_report_language(raw_result.get("report_language")),
+                code=clean_raw.get("code", record.code),
+                name=clean_raw.get("name", record.name),
+                sentiment_score=clean_raw.get("sentiment_score", record.sentiment_score or 50),
+                trend_prediction=clean_raw.get("trend_prediction", record.trend_prediction or ""),
+                operation_advice=clean_raw.get("operation_advice", record.operation_advice or ""),
+                decision_type=clean_raw.get("decision_type", "hold"),
+                confidence_level=clean_raw.get("confidence_level", "中"),
+                report_language=normalize_report_language(clean_raw.get("report_language")),
                 dashboard=dashboard,
-                trend_analysis=raw_result.get("trend_analysis", ""),
-                short_term_outlook=raw_result.get("short_term_outlook", ""),
-                medium_term_outlook=raw_result.get("medium_term_outlook", ""),
-                technical_analysis=raw_result.get("technical_analysis", ""),
-                ma_analysis=raw_result.get("ma_analysis", ""),
-                volume_analysis=raw_result.get("volume_analysis", ""),
-                pattern_analysis=raw_result.get("pattern_analysis", ""),
-                fundamental_analysis=raw_result.get("fundamental_analysis", ""),
-                sector_position=raw_result.get("sector_position", ""),
-                company_highlights=raw_result.get("company_highlights", ""),
-                news_summary=raw_result.get("news_summary", record.news_content or ""),
-                market_sentiment=raw_result.get("market_sentiment", ""),
-                hot_topics=raw_result.get("hot_topics", ""),
-                analysis_summary=raw_result.get("analysis_summary", record.analysis_summary or ""),
-                key_points=raw_result.get("key_points", ""),
-                risk_warning=raw_result.get("risk_warning", ""),
-                buy_reason=raw_result.get("buy_reason", ""),
-                market_snapshot=raw_result.get("market_snapshot"),
-                search_performed=raw_result.get("search_performed", False),
-                data_sources=raw_result.get("data_sources", ""),
-                success=raw_result.get("success", True),
-                error_message=raw_result.get("error_message"),
-                current_price=raw_result.get("current_price"),
-                change_pct=raw_result.get("change_pct"),
-                model_used=raw_result.get("model_used"),
+                trend_analysis=clean_raw.get("trend_analysis", ""),
+                short_term_outlook=clean_raw.get("short_term_outlook", ""),
+                medium_term_outlook=clean_raw.get("medium_term_outlook", ""),
+                technical_analysis=clean_raw.get("technical_analysis", ""),
+                ma_analysis=clean_raw.get("ma_analysis", ""),
+                volume_analysis=clean_raw.get("volume_analysis", ""),
+                pattern_analysis=clean_raw.get("pattern_analysis", ""),
+                fundamental_analysis=clean_raw.get("fundamental_analysis", ""),
+                sector_position=clean_raw.get("sector_position", ""),
+                company_highlights=clean_raw.get("company_highlights", ""),
+                news_summary=clean_raw.get("news_summary", record.news_content or ""),
+                market_sentiment=clean_raw.get("market_sentiment", ""),
+                hot_topics=clean_raw.get("hot_topics", ""),
+                analysis_summary=clean_raw.get("analysis_summary", record.analysis_summary or ""),
+                key_points=clean_raw.get("key_points", ""),
+                risk_warning=clean_raw.get("risk_warning", ""),
+                buy_reason=clean_raw.get("buy_reason", ""),
+                market_snapshot=clean_raw.get("market_snapshot"),
+                search_performed=clean_raw.get("search_performed", False),
+                data_sources=clean_raw.get("data_sources", ""),
+                success=clean_raw.get("success", True),
+                error_message=clean_raw.get("error_message"),
+                current_price=clean_raw.get("current_price"),
+                change_pct=clean_raw.get("change_pct"),
+                model_used=clean_raw.get("model_used"),
             )
             # Backfill empty flat fields from dashboard for legacy consumers
             self._backfill_from_dashboard(result)
@@ -622,7 +628,8 @@ class HistoryService:
                 news = intel["latest_news"]
                 if isinstance(news, list) and news:
                     result.news_summary = "\n".join(
-                        f"- {n.get('title', '') or n.get('content', '')}" for n in news[:5]
+                        f"- {n.get('title', '') or n.get('content', '')}" if isinstance(n, dict) else f"- {n}"
+                        for n in news[:5]
                     )
                 elif isinstance(news, str):
                     result.news_summary = news
@@ -634,7 +641,8 @@ class HistoryService:
                 cats = intel["positive_catalysts"]
                 if isinstance(cats, list) and cats:
                     result.company_highlights = "\n".join(
-                        f"- {c.get('catalyst', '') or c.get('content', '')}" for c in cats[:5]
+                        f"- {c.get('catalyst', '') or c.get('content', '')}" if isinstance(c, dict) else f"- {c}"
+                        for c in cats[:5]
                     )
                 elif isinstance(cats, str):
                     result.company_highlights = cats
@@ -642,7 +650,8 @@ class HistoryService:
                 alerts = intel["risk_alerts"]
                 if isinstance(alerts, list) and alerts:
                     result.hot_topics = "\n".join(
-                        f"- {a.get('risk', '') or a.get('content', '')}" for a in alerts[:5]
+                        f"- {a.get('risk', '') or a.get('content', '')}" if isinstance(a, dict) else f"- {a}"
+                        for a in alerts[:5]
                     )
                 elif isinstance(alerts, str):
                     result.hot_topics = alerts
