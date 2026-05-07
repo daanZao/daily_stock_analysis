@@ -199,15 +199,15 @@ K线与图表形态识别。
 
 ---
 
-### get_limit_up_down_stats
+### analyze_relative_strength
 
-60 日涨停/跌停/炸板/连板统计。
+个股相对强度与趋势质量分析（替代传统涨停计数）。
 
 | 属性 | 说明 |
 |------|------|
-| 参数 | `stock_code: string`；`days: int` — 统计天数（默认 60） |
-| 返回 | `{stock_code, status, period_days, limit_pct, limit_up_count, limit_down_count, failed_limit_up_count, max_consecutive_limit_up, limit_up_down_ratio, momentum_grade, grade_meaning}` |
-| 用途 | SEPA P2-动量验证；自动检测涨跌幅规则（科创/创业板 20%、ST 5%、主板 10%） |
+| 参数 | `stock_code: string`；`days: int` — 分析周期天数（默认 60） |
+| 返回 | `{stock_code, status, rs_rating, total_return_pct, annualized_return_pct, volatility_pct, max_drawdown_pct, excess_return_pct, alpha, beta, above_ma20_ratio, trend_consistency, new_high_count, up_days_ratio, sepa_score, momentum_grade, grade_meaning, ...}` |
+| 用途 | SEPA P2-动量验证；基于个股 vs 沪深300的 RS Rating（波动率调整，1-99分）、趋势持续性（MA20上方占比、创20日新高次数）、收益回撤比、波动率等多因子评分，映射到 SEPA 等级 S/A/B/C/D |
 
 ---
 
@@ -318,7 +318,7 @@ K线与图表形态识别。
 | 阶段分析（Stage） | 日K线 + MA50/150/200 | `get_daily_history`, `calculate_ma` |
 | 趋势模板（8条铁律） | 52周高低点 + RS排名 + MA | `get_52w_range`, `get_relative_strength`, `calculate_ma` |
 | E-盈利分析 | 季度财报趋势 | `get_financial_history`, `get_stock_info` |
-| P-价格行为 | 动量验证 + VCP | `get_limit_up_down_stats`, `analyze_pattern`, `get_volume_analysis` |
+| P-价格行为 | 动量验证 + VCP | `analyze_relative_strength`, `analyze_pattern`, `get_volume_analysis` |
 | A-催化剂 | 新闻/公告 | `search_stock_news`, `search_comprehensive_intel` |
 | 市场环境 | 大盘指数 | `get_market_indices`, `get_sector_rankings` |
 | 60分钟精修 | 60分钟K线 | `get_minutely_history` |

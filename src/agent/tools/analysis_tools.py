@@ -7,7 +7,9 @@ Tools:
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
+
+import numpy as np
 
 from src.agent.tools.registry import ToolParameter, ToolDefinition
 
@@ -753,121 +755,287 @@ analyze_pattern_tool = ToolDefinition(
 
 
 # ============================================================
-# get_limit_up_down_stats — 60-day limit-up / limit-down stats
+# analyze_relative_strength — Relative strength & trend quality
 # ============================================================
 
-def _detect_limit_pct(stock_code: str, stock_name: str = "") -> float:
-    """Return daily price limit percentage for a stock (0.20, 0.10, or 0.05)."""
-    c = str(stock_code or "").strip().split(".")[0]
-    name = str(stock_name or "").upper()
-    if "ST" in name:
-        return 0.05
-    if len(c) == 6 and c.isdigit():
-        if c.startswith("688") or c.startswith("30"):
-            return 0.20
-    return 0.10
+def _handle_analyze_relative_strength(stock_code: str, days: int = 60) -> dict:
+    """
+    Analyze stock relative strength vs CSI300 and trend quality.
 
+    Replaces the old limit-up/down counter with actual SEPA-aligned metrics:
+    - RS Rating (vs market, volatility-adjusted)
+    - Trend quality (above MA20 ratio, new highs, consistency)
+    - Risk metrics (max drawdown, volatility, return/drawdown ratio)
+    - SEPA grade (S/A/B/C/D) via multi-factor scoring
 
-def _handle_get_limit_up_down_stats(stock_code: str, days: int = 60) -> dict:
-    """Count limit-up, limit-down, failed limit-up, and consecutive limit-ups."""
+    Returns both backward-compatible fields (limit_up_count -> mapped from new_highs,
+    momentum_grade) and new fields (rs_rating, total_return, max_drawdown, etc.)
+    """
     from src.services.history_loader import load_history_df
     import pandas as pd
 
-    df, source = load_history_df(stock_code, days=max(days + 10, 80))
-    if df is None or df.empty:
-        return {"error": f"No historical data for {stock_code}"}
+    # Load stock and market (CSI300) data
+    stock_df, stock_source = load_history_df(stock_code, days=max(days + 20, 100))
+    index_df, index_source = load_history_df("000300", days=max(days + 20, 100))
 
-    df = df.tail(days).copy().reset_index(drop=True)
+    if stock_df is None or stock_df.empty or len(stock_df) < 20:
+        return {"error": f"Insufficient stock data for {stock_code}"}
+
+    stock_df = stock_df.sort_values("date").reset_index(drop=True)
+    df = stock_df.tail(days).copy().reset_index(drop=True)
     if len(df) < 10:
-        return {"error": f"Insufficient data for limit-up stats (got {len(df)} days, need >= 10)"}
+        return {"error": f"Insufficient data for relative strength (got {len(df)} days, need >= 10)"}
 
-    limit_pct = _detect_limit_pct(stock_code)
-    limit_pct_display = limit_pct * 100
+    # Ensure numeric columns
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Ensure required columns exist
-    required = {"open", "high", "low", "close"}
-    if not required.issubset(df.columns):
-        return {"error": f"Missing required columns: {required - set(df.columns)}"}
+    df["pct_change"] = df["close"].pct_change() * 100
+    df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
 
-    # Derive pre_close from close and pct_chg when available
-    if "pct_chg" in df.columns:
-        pre_close = df["close"] / (1 + df["pct_chg"] / 100.0)
-    else:
-        pre_close = df["close"].shift(1)
-        pre_close.iloc[0] = df["open"].iloc[0]  # best-effort for first row
+    # ---------- 1. Absolute return & risk ----------
+    total_return = float((df["close"].iloc[-1] / df["close"].iloc[0] - 1) * 100)
+    annualized_return = float(total_return * 252 / len(df))
+    volatility = float(df["pct_change"].std() * np.sqrt(252))
 
-    limit_up_price = pre_close * (1 + limit_pct)
-    limit_down_price = pre_close * (1 - limit_pct)
+    # Max drawdown
+    cumulative = (1 + df["pct_change"] / 100).cumprod()
+    running_max = cumulative.expanding().max()
+    drawdown = (cumulative - running_max) / running_max * 100
+    max_drawdown = float(drawdown.min())
 
-    # Tolerance for rounding/market rules
-    tol = 0.005  # 0.5% tolerance
+    # ---------- 2. Relative strength vs market ----------
+    rs_rating = 50.0
+    alpha = 0.0
+    beta = 1.0
+    excess_return = total_return
+    daily_alpha: list = []
 
-    is_limit_up = df["close"] >= limit_up_price * (1 - tol)
-    is_limit_down = df["close"] <= limit_down_price * (1 + tol)
-    # Failed limit-up: high touched limit-up zone but close did not seal it
-    is_failed_limit_up = (df["high"] >= limit_up_price * (1 - tol)) & (~is_limit_up)
+    if index_df is not None and not index_df.empty and len(index_df) >= len(df):
+        index_df = index_df.sort_values("date").reset_index(drop=True)
+        mkt = index_df.tail(len(df)).copy().reset_index(drop=True)
+        mkt["pct_change"] = mkt["close"].pct_change() * 100
 
-    limit_up_count = int(is_limit_up.sum())
-    limit_down_count = int(is_limit_down.sum())
-    failed_limit_up_count = int(is_failed_limit_up.sum())
-
-    # Max consecutive limit-up days
-    max_consecutive = 0
-    current = 0
-    for flag in is_limit_up:
-        if flag:
-            current += 1
-            max_consecutive = max(max_consecutive, current)
+        # Align by date if available
+        if "date" in df.columns and "date" in mkt.columns:
+            s = df[["date", "pct_change"]].copy()
+            m = mkt[["date", "pct_change"]].copy()
+            s["date"] = s["date"].astype(str)
+            m["date"] = m["date"].astype(str)
+            merged = pd.merge(
+                s.rename(columns={"pct_change": "stock_ret"}),
+                m.rename(columns={"pct_change": "mkt_ret"}),
+                on="date",
+            )
         else:
-            current = 0
+            merged = pd.DataFrame({
+                "stock_ret": df["pct_change"].values,
+                "mkt_ret": mkt["pct_change"].values[:len(df)],
+            })
 
-    # Grade based on SEPA momentum criteria
-    ratio = limit_up_count / max(limit_down_count, 1)
-    if limit_down_count == 0:
-        ratio = float(limit_up_count) if limit_up_count > 0 else 0.0
+        merged = merged.dropna()
+        if len(merged) >= 10:
+            # Beta & Alpha (CAPM simplified)
+            cov = np.cov(merged["stock_ret"], merged["mkt_ret"])
+            if cov[1, 1] != 0:
+                beta = float(cov[0, 1] / cov[1, 1])
 
-    if 3 <= limit_up_count <= 8 and limit_down_count == 0 and failed_limit_up_count < limit_up_count * 0.3:
-        grade = "S"
-    elif 8 <= limit_up_count <= 15 and limit_down_count <= 1 and ratio >= 5:
-        grade = "A"
-    elif 15 <= limit_up_count <= 25 and limit_down_count <= 2 and ratio >= 3:
-        grade = "B"
-    elif limit_up_count > 25 or limit_down_count >= 3 or ratio < 3:
-        grade = "C"
+            mkt_mean = merged["mkt_ret"].mean()
+            stock_mean = merged["stock_ret"].mean()
+            alpha = float(stock_mean - beta * mkt_mean)
+
+            mkt_total = float((mkt["close"].iloc[-1] / mkt["close"].iloc[0] - 1) * 100)
+            excess_return = float(total_return - mkt_total)
+
+            # RS Rating (volatility-adjusted excess return, mapped 1-99)
+            window = min(60, len(merged))
+            sr = merged["stock_ret"].tail(window)
+            mr = merged["mkt_ret"].tail(window)
+            stock_cum = (1 + sr / 100).cumprod().iloc[-1] - 1
+            mkt_cum = (1 + mr / 100).cumprod().iloc[-1] - 1
+            if mkt_cum != 0:
+                vol = sr.std() * np.sqrt(252)
+                excess = stock_cum - mkt_cum
+                raw_score = 50.0 + (excess / vol * 50.0) if vol != 0 else 50.0
+                if stock_cum > 0 and mkt_cum > 0 and stock_cum / mkt_cum > 2:
+                    raw_score += 20
+                rs_rating = float(np.clip(raw_score, 1.0, 99.0))
+
+            daily_alpha = (merged["stock_ret"] - merged["mkt_ret"]).tolist()
+
+    # ---------- 3. Trend quality (SEPA Trend Template) ----------
+    up_days_ratio = float((df["pct_change"] > 0).mean())
+
+    # New 20-day highs
+    df["high_20"] = df["high"].rolling(window=20, min_periods=1).max()
+    df["is_new_high_20"] = df["high"] >= df["high_20"].shift(1).fillna(0) * 0.999
+    new_high_count = int(df["is_new_high_20"].sum())
+
+    # Above MA20 ratio (SEPA: price > MA20)
+    df["above_ma20"] = df["close"] > df["ma20"]
+    above_ma20_ratio = float(df["above_ma20"].mean())
+
+    # Trend consistency (price & MA20 move in same direction)
+    df["price_dir"] = df["close"].diff().fillna(0)
+    df["ma20_dir"] = df["ma20"].diff().fillna(0)
+    df["aligned"] = (df["price_dir"] * df["ma20_dir"]) > 0
+    trend_consistency = float(df["aligned"].mean())
+
+    # ---------- 4. SEPA grade scoring ----------
+    grade_scores = []
+    reasons = []
+    risks = []
+
+    # RS Rating (highest weight)
+    if rs_rating >= 90:
+        grade_scores.append(30)
+        reasons.append(f"RS Rating {rs_rating:.0f}，市场前10%超级强势股")
+    elif rs_rating >= 80:
+        grade_scores.append(25)
+        reasons.append(f"RS Rating {rs_rating:.0f}，符合SEPA强势标准")
+    elif rs_rating >= 60:
+        grade_scores.append(15)
+        reasons.append(f"RS Rating {rs_rating:.0f}，中等强度")
+    elif rs_rating >= 40:
+        grade_scores.append(8)
+        risks.append(f"RS Rating {rs_rating:.0f}，弱于市场平均")
     else:
-        grade = "F" if limit_down_count >= 2 else "B"
+        grade_scores.append(2)
+        risks.append(f"RS Rating {rs_rating:.0f}，严重跑输市场")
 
-    # If any limit-down without limit-up offset -> F
-    if limit_down_count >= 2 and limit_up_count < limit_down_count * 3:
-        grade = "F"
+    # Trend persistence
+    if above_ma20_ratio >= 0.9:
+        grade_scores.append(20)
+        reasons.append(f"90%时间运行在MA20上方，趋势极强")
+    elif above_ma20_ratio >= 0.75:
+        grade_scores.append(15)
+        reasons.append(f"75%时间运行在MA20上方，趋势良好")
+    elif above_ma20_ratio >= 0.5:
+        grade_scores.append(8)
+        risks.append(f"仅{above_ma20_ratio*100:.0f}%时间在MA20上方，趋势不稳")
+    else:
+        grade_scores.append(0)
+        risks.append(f"长期低于MA20，处于下降通道")
+
+    # New high momentum
+    if new_high_count >= 8:
+        grade_scores.append(15)
+        reasons.append(f"{days}天内{new_high_count}次创20日新高，动量持续")
+    elif new_high_count >= 4:
+        grade_scores.append(10)
+        reasons.append(f"{new_high_count}次创20日新高，有一定动量")
+    elif new_high_count >= 1:
+        grade_scores.append(5)
+    else:
+        grade_scores.append(0)
+        risks.append("无20日新高，缺乏上涨动能")
+
+    # Return/drawdown ratio
+    if max_drawdown != 0:
+        rr_ratio = abs(annualized_return / max_drawdown)
+        if rr_ratio >= 3:
+            grade_scores.append(15)
+            reasons.append(f"收益回撤比{rr_ratio:.1f}，风险控制好")
+        elif rr_ratio >= 1.5:
+            grade_scores.append(10)
+        elif rr_ratio >= 0.5:
+            grade_scores.append(5)
+        else:
+            risks.append(f"收益回撤比{rr_ratio:.1f}，风险收益比差")
+    else:
+        grade_scores.append(10)
+
+    # Volatility adjustment (penalty for extreme volatility)
+    if volatility > 80:
+        grade_scores.append(-10)
+        risks.append(f"年化波动率{volatility:.0f}%，妖股特征")
+    elif volatility > 50:
+        grade_scores.append(5)
+    elif volatility > 30:
+        grade_scores.append(10)
+        reasons.append(f"波动率{volatility:.0f}%，适中")
+    else:
+        grade_scores.append(12)
+        reasons.append(f"波动率{volatility:.0f}%，稳健")
+
+    total_score = sum(grade_scores)
+
+    # Map to SEPA grade
+    if total_score >= 80 and rs_rating >= 80 and above_ma20_ratio >= 0.8:
+        grade = "S"
+        grade_meaning = "超级强势股：高RS+强趋势+低风险，SEPA核心候选"
+    elif total_score >= 65 and rs_rating >= 70:
+        grade = "A"
+        grade_meaning = "强势股：趋势良好，RS较高，可纳入观察"
+    elif total_score >= 50:
+        grade = "B"
+        grade_meaning = "中等强度：有潜力但需等待更好的买点或RS提升"
+    elif total_score >= 35:
+        grade = "C"
+        grade_meaning = "弱势或震荡：不建议参与"
+    else:
+        grade = "D"
+        grade_meaning = "严重弱势：跑输市场，一票否决"
+
+    # Hard vetos (true SEPA red lines)
+    if rs_rating < 40:
+        grade = "D"
+        grade_meaning = f"RS Rating仅{rs_rating:.0f}，严重跑输大盘，SEPA一票否决"
+    elif max_drawdown < -30 and total_return < 0:
+        grade = "D"
+        grade_meaning = f"深度亏损且回撤{max_drawdown:.1f}%，趋势破坏"
+    elif above_ma20_ratio < 0.3 and trend_consistency < 0.4:
+        grade = "D"
+        grade_meaning = "长期空头排列，无趋势可言"
+
+    # ---------- 5. Backward-compatible + new fields ----------
+    # Map new metrics to legacy field names so existing prompts still work
+    # "limit_up_count" -> proxy: new_high_count (both measure upward momentum)
+    # "limit_down_count" -> proxy: days with negative return
+    down_days = int((df["pct_change"] < 0).sum())
+    failed_limit_up = int((df["high"] >= df["close"].shift(1) * 1.095).sum()) if len(df) > 1 else 0
 
     return {
+        # Backward-compatible fields (existing prompts reference these)
         "stock_code": stock_code,
         "status": "ok",
-        "source": source,
+        "source": stock_source,
         "period_days": len(df),
-        "limit_pct": limit_pct_display,
-        "limit_up_count": limit_up_count,
-        "limit_down_count": limit_down_count,
-        "failed_limit_up_count": failed_limit_up_count,
-        "max_consecutive_limit_up": max_consecutive,
-        "limit_up_down_ratio": round(ratio, 1),
+        "limit_up_count": new_high_count,           # mapped from new_high_count
+        "limit_down_count": down_days,              # mapped from down days
+        "failed_limit_up_count": failed_limit_up,   # best-effort proxy
+        "max_consecutive_limit_up": 0,              # no longer computed
+        "limit_up_down_ratio": round(new_high_count / max(down_days, 1), 1),
         "momentum_grade": grade,
-        "grade_meaning": {
-            "S": "健康动量，机构+游资共振",
-            "A": "强动量，需结合VCP确认",
-            "B": "高动量但过热，轻仓试探",
-            "C": "妖股/庄股特征，一票否决",
-            "F": "弱势/暴雷，一票否决",
-        }.get(grade, ""),
+        "grade_meaning": grade_meaning,
+
+        # New fields (richer analysis)
+        "rs_rating": round(rs_rating, 1),
+        "total_return_pct": round(total_return, 2),
+        "annualized_return_pct": round(annualized_return, 2),
+        "volatility_pct": round(volatility, 2),
+        "max_drawdown_pct": round(max_drawdown, 2),
+        "excess_return_pct": round(excess_return, 2),
+        "alpha": round(alpha, 3),
+        "beta": round(beta, 2),
+        "above_ma20_ratio": round(above_ma20_ratio, 3),
+        "trend_consistency": round(trend_consistency, 3),
+        "new_high_count": new_high_count,
+        "up_days_ratio": round(up_days_ratio, 3),
+        "sepa_score": total_score,
+        "sepa_reasons": reasons,
+        "sepa_risks": risks,
+        "daily_alpha": daily_alpha[-10:] if daily_alpha else [],
     }
 
 
-get_limit_up_down_stats_tool = ToolDefinition(
-    name="get_limit_up_down_stats",
-    description="统计最近 N 个交易日的涨停、跌停、炸板次数及最大连板天数。"
-                "自动识别涨跌停规则：科创板/创业板（20%）、ST 股（5%）、普通 A 股（10%）。"
-                "返回动量等级（S/A/B/C/F），与 SEPA 筛选标准对齐。",
+analyze_relative_strength_tool = ToolDefinition(
+    name="analyze_relative_strength",
+    description="分析股票相对强度和趋势质量（替代传统的涨停计数）。"
+                "基于个股 vs 沪深300的相对强度(RS Rating)、趋势持续性(MA20上方占比)、"
+                "新高次数、收益回撤比、波动率等多维度评分。"
+                "返回SEPA动量等级(S/A/B/C/D)及详细指标。",
     parameters=[
         ToolParameter(
             name="stock_code",
@@ -877,12 +1045,12 @@ get_limit_up_down_stats_tool = ToolDefinition(
         ToolParameter(
             name="days",
             type="integer",
-            description="统计的最近交易日数量（默认：60）",
+            description="分析周期天数（默认：60）",
             required=False,
             default=60,
         ),
     ],
-    handler=_handle_get_limit_up_down_stats,
+    handler=_handle_analyze_relative_strength,
     category="analysis",
 )
 
@@ -892,5 +1060,5 @@ ALL_ANALYSIS_TOOLS = [
     calculate_ma_tool,
     get_volume_analysis_tool,
     analyze_pattern_tool,
-    get_limit_up_down_stats_tool,
+    analyze_relative_strength_tool,
 ]

@@ -513,14 +513,17 @@ def format_analysis_prompt(
 | 52周低点 | {sepa.get('low_52w', 'N/A')} | 距低点 {sepa.get('pct_from_52w_low', 'N/A')}% |
 | RS相对强度 | {sepa.get('rs_rank_pct', 'N/A')} | {"通过(RS>=70)" if sepa.get('pass_sepa_rs_70') else "未通过/无数据"} |
 
-### 动量验证（60日）
-| 指标 | 数值 |
-|------|------|
-| 涨停次数 | {sepa.get('limit_up_count', 'N/A')} 次 |
-| 跌停次数 | {sepa.get('limit_down_count', 'N/A')} 次 |
-| 炸板次数 | {sepa.get('failed_limit_up_count', 'N/A')} 次 |
-| 最大连板天数 | {sepa.get('max_consecutive_limit_up', 'N/A')} 天 |
-| 动量等级 | {sepa.get('momentum_grade', 'N/A')} ({sepa.get('grade_meaning', '')}) |
+### 动量验证（60日）—— 相对强度与趋势质量
+| 指标 | 数值 | 说明 |
+|------|------|------|
+| **RS Rating** | {sepa.get('rs_rating', 'N/A')} / 100 | SEPA要求>=80（vs沪深300，波动率调整） |
+| **SEPA评分** | {sepa.get('sepa_score', 'N/A')} | 多因子综合得分（0-100） |
+| **动量等级** | {sepa.get('momentum_grade', 'N/A')} | {sepa.get('grade_meaning', '')} |
+| 区间收益 | {sepa.get('total_return_pct', 'N/A')}% | 60日总收益率 |
+| 最大回撤 | {sepa.get('max_drawdown_pct', 'N/A')}% | 期间最大回撤 |
+| MA20上方占比 | {sepa.get('above_ma20_ratio', 'N/A') if isinstance(sepa.get('above_ma20_ratio'), str) else f"{sepa.get('above_ma20_ratio')*100:.1f}%" if sepa.get('above_ma20_ratio') is not None else 'N/A'} | 趋势持续性（SEPA要求大部分时间>MA20） |
+| 趋势一致性 | {sepa.get('trend_consistency', 'N/A') if isinstance(sepa.get('trend_consistency'), str) else f"{sepa.get('trend_consistency')*100:.1f}%" if sepa.get('trend_consistency') is not None else 'N/A'} | 价格与MA20同向运动天数占比 |
+| 创20日新高次数 | {sepa.get('new_high_count', 'N/A')} 次 | 动量持续性指标 |
 """
 
     # 添加实时行情数据（量比、换手率等）

@@ -624,7 +624,7 @@ class StockAnalysisPipeline:
             # 2. 52周高低点、RS、涨停统计（调用已有工具 handler，失败不阻断）
             try:
                 from src.agent.tools.data_tools import _handle_get_52w_range, _handle_get_relative_strength
-                from src.agent.tools.analysis_tools import _handle_get_limit_up_down_stats
+                from src.agent.tools.analysis_tools import _handle_analyze_relative_strength
                 w52 = _handle_get_52w_range(code)
                 if w52.get('status') == 'ok':
                     sepa['high_52w'] = w52.get('high_52w')
@@ -640,14 +640,20 @@ class StockAnalysisPipeline:
                     sepa['rs_ratio'] = rs.get('rs_ratio')
                     sepa['rs_rank_pct'] = rs.get('rs_rank_pct')
                     sepa['pass_sepa_rs_70'] = rs.get('pass_sepa_rs_70')
-                limit_stats = _handle_get_limit_up_down_stats(code, days=60)
-                if limit_stats.get('status') == 'ok':
-                    sepa['limit_up_count'] = limit_stats.get('limit_up_count')
-                    sepa['limit_down_count'] = limit_stats.get('limit_down_count')
-                    sepa['failed_limit_up_count'] = limit_stats.get('failed_limit_up_count')
-                    sepa['max_consecutive_limit_up'] = limit_stats.get('max_consecutive_limit_up')
-                    sepa['momentum_grade'] = limit_stats.get('momentum_grade')
-                    sepa['grade_meaning'] = limit_stats.get('grade_meaning')
+                rs_result = _handle_analyze_relative_strength(code, days=60)
+                if rs_result.get('status') == 'ok':
+                    sepa['limit_up_count'] = rs_result.get('limit_up_count')
+                    sepa['limit_down_count'] = rs_result.get('limit_down_count')
+                    sepa['failed_limit_up_count'] = rs_result.get('failed_limit_up_count')
+                    sepa['max_consecutive_limit_up'] = rs_result.get('max_consecutive_limit_up')
+                    sepa['momentum_grade'] = rs_result.get('momentum_grade')
+                    sepa['grade_meaning'] = rs_result.get('grade_meaning')
+                    sepa['rs_rating'] = rs_result.get('rs_rating')
+                    sepa['sepa_score'] = rs_result.get('sepa_score')
+                    sepa['above_ma20_ratio'] = rs_result.get('above_ma20_ratio')
+                    sepa['trend_consistency'] = rs_result.get('trend_consistency')
+                    sepa['total_return_pct'] = rs_result.get('total_return_pct')
+                    sepa['max_drawdown_pct'] = rs_result.get('max_drawdown_pct')
             except Exception as exc:
                 logger.warning("[%s] SEPA field injection failed: %s", code, exc)
             enhanced['sepa_analysis'] = sepa
@@ -669,53 +675,71 @@ class StockAnalysisPipeline:
                 vol = getattr(realtime_quote, 'volume', None)
                 amt = getattr(realtime_quote, 'amount', None)
                 pct = getattr(realtime_quote, 'change_pct', None)
-                realtime_today = {
-                    'close': price,
-                    'open': open_p,
-                    'high': high_p,
-                    'low': low_p,
-                    'ma5': trend_result.ma5,
-                    'ma10': trend_result.ma10,
-                    'ma20': trend_result.ma20,
-                }
-                if vol is not None:
-                    realtime_today['volume'] = vol
-                if amt is not None:
-                    realtime_today['amount'] = amt
-                if pct is not None:
-                    realtime_today['pct_chg'] = pct
-                for k, v in orig_today.items():
-                    if k not in realtime_today and v is not None:
-                        realtime_today[k] = v
-                enhanced['today'] = realtime_today
-                enhanced['ma_status'] = self._compute_ma_status(
-                    price, trend_result.ma5, trend_result.ma10, trend_result.ma20
+
+                # Skip realtime override when data clearly reflects pre-market state:
+                # volume is 0/None AND all prices are identical (no actual trading yet).
+                is_premarket = (
+                    (vol is None or vol == 0)
+                    and open_p == price
+                    and high_p == price
+                    and low_p == price
                 )
-                enhanced['date'] = get_market_now(
-                    get_market_for_stock(normalize_stock_code(enhanced.get('code', '')))
-                ).date().isoformat()
-                if yesterday_close is not None:
-                    try:
-                        yc = float(yesterday_close)
-                        if yc > 0:
-                            enhanced['price_change_ratio'] = round(
-                                (price - yc) / yc * 100, 2
-                            )
-                    except (TypeError, ValueError):
-                        pass
-                if vol is not None and enhanced.get('yesterday'):
-                    yest_vol = enhanced['yesterday'].get('volume') if isinstance(
-                        enhanced['yesterday'], dict
-                    ) else None
-                    if yest_vol is not None:
+                if is_premarket:
+                    logger.debug(
+                        "[%s] Skipping realtime override: pre-market state detected "
+                        "(price=%s, vol=%s)",
+                        enhanced.get('code', ''),
+                        price,
+                        vol,
+                    )
+                else:
+                    realtime_today = {
+                        'close': price,
+                        'open': open_p,
+                        'high': high_p,
+                        'low': low_p,
+                        'ma5': trend_result.ma5,
+                        'ma10': trend_result.ma10,
+                        'ma20': trend_result.ma20,
+                    }
+                    if vol is not None:
+                        realtime_today['volume'] = vol
+                    if amt is not None:
+                        realtime_today['amount'] = amt
+                    if pct is not None:
+                        realtime_today['pct_chg'] = pct
+                    for k, v in orig_today.items():
+                        if k not in realtime_today and v is not None:
+                            realtime_today[k] = v
+                    enhanced['today'] = realtime_today
+                    enhanced['ma_status'] = self._compute_ma_status(
+                        price, trend_result.ma5, trend_result.ma10, trend_result.ma20
+                    )
+                    enhanced['date'] = get_market_now(
+                        get_market_for_stock(normalize_stock_code(enhanced.get('code', '')))
+                    ).date().isoformat()
+                    if yesterday_close is not None:
                         try:
-                            yv = float(yest_vol)
-                            if yv > 0:
-                                enhanced['volume_change_ratio'] = round(
-                                    float(vol) / yv, 2
+                            yc = float(yesterday_close)
+                            if yc > 0:
+                                enhanced['price_change_ratio'] = round(
+                                    (price - yc) / yc * 100, 2
                                 )
                         except (TypeError, ValueError):
                             pass
+                    if vol is not None and enhanced.get('yesterday'):
+                        yest_vol = enhanced['yesterday'].get('volume') if isinstance(
+                            enhanced['yesterday'], dict
+                        ) else None
+                        if yest_vol is not None:
+                            try:
+                                yv = float(yest_vol)
+                                if yv > 0:
+                                    enhanced['volume_change_ratio'] = round(
+                                        float(vol) / yv, 2
+                                    )
+                            except (TypeError, ValueError):
+                                pass
 
         # ETF/index flag for analyzer prompt (Fixes #274)
         enhanced['is_index_etf'] = SearchService.is_index_or_etf(
@@ -1105,8 +1129,14 @@ class StockAnalysisPipeline:
             if not result.news_summary and intel.get("latest_news"):
                 news = intel["latest_news"]
                 if isinstance(news, list) and news:
+                    def _fmt_news_item(n):
+                        if isinstance(n, dict):
+                            return f"- {n.get('title', '') or n.get('content', '')}"
+                        if isinstance(n, str):
+                            return f"- {n}"
+                        return f"- {str(n)}"
                     result.news_summary = "\n".join(
-                        f"- {n.get('title', '') or n.get('content', '')}" for n in news[:5]
+                        _fmt_news_item(n) for n in news[:5]
                     )
                 elif isinstance(news, str):
                     result.news_summary = news
