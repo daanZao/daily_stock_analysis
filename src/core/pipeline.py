@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple, Callable
 
+import numpy as np
 import pandas as pd
 
 from src.config import get_config, Config
@@ -30,6 +31,7 @@ from data_provider.realtime_types import ChipDistribution
 from src.analyzer import (
     GeminiAnalyzer,
     AnalysisResult,
+    _format_volume,
     fill_chip_structure_if_needed,
     fill_price_position_if_needed,
     format_analysis_prompt,
@@ -44,7 +46,7 @@ from src.report_language import (
 from src.search_service import SearchService
 from src.services.social_sentiment_service import SocialSentimentService
 from src.enums import ReportType
-from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
+from src.stock_analyzer import BuySignal, StockTrendAnalyzer, TrendAnalysisResult
 from src.core.trading_calendar import (
     get_effective_trading_date,
     get_market_for_stock,
@@ -362,6 +364,9 @@ class StockAnalysisPipeline:
                     if self.config.enable_realtime_quote and realtime_quote:
                         df = self._augment_historical_with_realtime(df, realtime_quote, code)
                     trend_result = self.trend_analyzer.analyze(df, code)
+                    # 最小阻力校验：筹码分布确认趋势方向的阻力大小
+                    _price = getattr(realtime_quote, 'price', None) if realtime_quote else None
+                    self._validate_least_resistance(trend_result, chip_data, current_price=_price)
                     logger.info(f"{stock_name}({code}) 趋势分析: {trend_result.trend_status.value}, "
                               f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}")
             except Exception as e:
@@ -535,6 +540,41 @@ class StockAnalysisPipeline:
     # SEPA 数据质量门禁
     # ------------------------------------------------------------------
 
+    _FUNDAMENTAL_KEY_FIELDS: Tuple[str, ...] = (
+        "revenue",
+        "net_profit_parent",
+        "revenue_yoy",
+        "net_profit_yoy",
+        "roe",
+        "gross_margin",
+        "net_margin",
+        "eps",
+    )
+
+    @staticmethod
+    def _has_numeric_value(data: Any, fields: Tuple[str, ...]) -> bool:
+        """Return True if at least one field in `data` has a valid numeric value (0 counts, None/NaN/empty does not)."""
+        if not isinstance(data, dict):
+            return False
+        for f in fields:
+            v = data.get(f)
+            if v is None:
+                continue
+            if isinstance(v, (int, float)):
+                if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                    continue
+                return True
+            if isinstance(v, str):
+                s = v.strip()
+                if not s:
+                    continue
+                try:
+                    float(s)
+                    return True
+                except (ValueError, TypeError):
+                    continue
+        return False
+
     def _validate_sepa_data_quality(
         self,
         enhanced_context: Dict[str, Any],
@@ -561,26 +601,37 @@ class StockAnalysisPipeline:
             if val is None or val <= 0:
                 return False, f"均线数据缺失: {ma}={val}"
 
-        # 3. 检查季度业绩数据（最少 1 个季度）
+        # 3. 检查季度业绩数据（最少 1 个季度，且关键字段有有效数值）
         financial_reports = enhanced_context.get('financial_reports', [])
-        has_fr = bool(financial_reports and len(financial_reports) >= 1)
+        has_fr = False
+        if financial_reports and len(financial_reports) >= 1:
+            for report in financial_reports:
+                if self._has_numeric_value(report, self._FUNDAMENTAL_KEY_FIELDS):
+                    has_fr = True
+                    break
 
         # 备选：检查 fundamental_context 中的 earnings
         has_fundamental_earnings = False
         if fundamental_context:
             earnings = fundamental_context.get('earnings')
             if earnings and isinstance(earnings, dict):
-                # earnings 结构: {financial_report: {...}, forecast_summary: str, quick_report_summary: str, dividend: {...}}
-                # 只要任一子块有值就算有效
-                for k, v in earnings.items():
-                    if v is None:
-                        continue
-                    if isinstance(v, dict) and any(vv is not None for vv in v.values()):
+                # 优先检查与 prompt 注入路径一致的结构（data.financial_report 或 financial_report）
+                for report in (
+                    earnings.get('data', {}).get('financial_report', {}),
+                    earnings.get('financial_report', {}),
+                ):
+                    if self._has_numeric_value(report, self._FUNDAMENTAL_KEY_FIELDS):
                         has_fundamental_earnings = True
                         break
-                    if isinstance(v, str) and v.strip():
-                        has_fundamental_earnings = True
-                        break
+
+                # 兜底：检查其他文本型字段（forecast_summary 等）
+                if not has_fundamental_earnings:
+                    for k, v in earnings.items():
+                        if v is None:
+                            continue
+                        if isinstance(v, str) and v.strip():
+                            has_fundamental_earnings = True
+                            break
 
         if has_fr or has_fundamental_earnings:
             return True, ""
@@ -588,11 +639,11 @@ class StockAnalysisPipeline:
         if not has_fr and not has_fundamental_earnings:
             return (
                 False,
-                "季度业绩数据缺失: FinancialReport 表无记录且 fundamental_context.earnings 为空"
+                "季度业绩数据缺失: FinancialReport 表无有效数值且 fundamental_context.earnings 无有效数值"
             )
         if not has_fr:
-            return False, "季度业绩数据缺失: FinancialReport 表无记录"
-        return False, "季度业绩数据缺失: fundamental_context.earnings 为空"
+            return False, "季度业绩数据缺失: FinancialReport 表无有效数值"
+        return False, "季度业绩数据缺失: fundamental_context.earnings 无有效数值"
 
     def _invalidate_stock_history_cache(self, code: str) -> None:
         """清除股票历史日线 DB 缓存，强制下次从网络重新获取。"""
@@ -609,6 +660,157 @@ class StockAnalysisPipeline:
                 )
         except Exception as e:
             logger.warning(f"[{code}] 清除历史缓存失败: {e}")
+
+    def _validate_least_resistance(
+        self,
+        trend_result: TrendAnalysisResult,
+        chip_data: Optional[Any],
+        current_price: Optional[float] = None,
+    ) -> None:
+        """最小阻力方向校验 — 不评分，只过滤（当前仅覆盖做多方向）。
+
+        当趋势、量能、RS 指向做多方向时，筹码分布确认"向上阻力确实小"才放行。
+        否则写入 risk_factors 并降级信号。
+        """
+        if not chip_data or not trend_result:
+            return
+
+        # 统一从 ChipDistribution 或 dict 提取字段
+        if hasattr(chip_data, "profit_ratio"):
+            concentration_90 = float(getattr(chip_data, "concentration_90", 1.0) or 1.0)
+            profit_ratio = float(getattr(chip_data, "profit_ratio", 0.5) or 0.5)
+            avg_cost = float(getattr(chip_data, "avg_cost", 0.0) or 0.0)
+        else:
+            chip_dict = chip_data if isinstance(chip_data, dict) else {}
+            concentration_90 = float(chip_dict.get("concentration_90", 1.0) or 1.0)
+            profit_ratio = float(chip_dict.get("profit_ratio", 0.5) or 0.5)
+            avg_cost = float(chip_dict.get("avg_cost", 0.0) or 0.0)
+
+        # 向上阻力校验（做多时）
+        if trend_result.buy_signal.value in ("强烈买入", "买入"):
+            # 情况1：获利盘极高 + 筹码发散 → 到处都是抛压
+            if profit_ratio > 0.85 and concentration_90 > 0.20:
+                trend_result.risk_factors.append(
+                    f"最小阻力：获利比例{profit_ratio:.0%}且筹码发散，上方抛压重重"
+                )
+                if trend_result.buy_signal.value == "强烈买入":
+                    trend_result.buy_signal = BuySignal.BUY
+
+            # 情况2：现价远离平均成本，下方支撑真空
+            if avg_cost > 0 and current_price and current_price > avg_cost * 1.15:
+                if concentration_90 > 0.25:
+                    trend_result.risk_factors.append(
+                        f"最小阻力：现价高于平均成本{(current_price / avg_cost - 1) * 100:.0f}%，"
+                        f"下方支撑真空，回调无承接"
+                    )
+
+    def _fetch_minutely_analysis(self, code: str, days: int = 5) -> Dict[str, Any]:
+        """获取60分钟K线并计算关键指标（RSI、MA20、K线形态、量趋势）。
+
+        Returns:
+            {"status": "ok" | "no_data", "records": [...], "rsi_14": float|None,
+             "ma20": float|None, "latest_pattern": str, "volume_trend": str,
+             "above_ma20": bool, "latest_close": float|None}
+        """
+        try:
+            from src.agent.tools.data_tools import _handle_get_minutely_history
+            raw = _handle_get_minutely_history(code, days=days)
+            if raw.get("status") != "ok":
+                return {"status": "no_data", "code": code}
+
+            records = raw.get("records", [])
+            if len(records) < 20:
+                return {"status": "no_data", "code": code, "note": "数据不足20根"}
+
+            df = pd.DataFrame(records)
+            if "close" not in df.columns or df["close"].isna().all():
+                return {"status": "no_data", "code": code, "note": "close字段缺失"}
+
+            df["close"] = pd.to_numeric(df["close"], errors="coerce")
+            df["open"] = pd.to_numeric(df.get("open", df["close"]), errors="coerce")
+            df["high"] = pd.to_numeric(df.get("high", df["close"]), errors="coerce")
+            df["low"] = pd.to_numeric(df.get("low", df["close"]), errors="coerce")
+            df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce")
+
+            # RSI(14) — 复用 stock_analyzer 的手动计算逻辑
+            delta = df["close"].diff()
+            gain = delta.where(delta > 0, 0)
+            loss = -delta.where(delta < 0, 0)
+            avg_gain = gain.rolling(window=14, min_periods=14).mean()
+            avg_loss = loss.rolling(window=14, min_periods=14).mean()
+            rs = avg_gain / avg_loss.replace(0, np.nan)
+            df["rsi_14"] = 100 - (100 / (1 + rs))
+
+            # MA20
+            df["ma20"] = df["close"].rolling(window=20, min_periods=20).mean()
+
+            latest = df.iloc[-1]
+            prev = df.iloc[-2] if len(df) >= 2 else latest
+
+            # K线形态判断
+            o, h, l, c = latest["open"], latest["high"], latest["low"], latest["close"]
+            body = abs(c - o)
+            rng = h - l if h != l else 1e-6
+            pattern = "—"
+            if rng > 0:
+                if body / rng < 0.1:
+                    pattern = "十字星"
+                elif c > o and (o - l) > body * 2 and (h - c) < body * 0.5:
+                    pattern = "锤子线"
+                elif c < o and (h - o) > body * 2 and (c - l) < body * 0.5:
+                    pattern = "流星线"
+                elif c > o and prev["close"] < prev["open"] and o < prev["close"] and c > prev["open"]:
+                    pattern = "阳吞没"
+                elif c < o and prev["close"] > prev["open"] and o > prev["close"] and c < prev["open"]:
+                    pattern = "阴吞没"
+
+            # 量趋势：最近3根 vs 前3根
+            vol_trend = "—"
+            if len(df) >= 6:
+                recent_vol = df["volume"].iloc[-3:].mean()
+                prior_vol = df["volume"].iloc[-6:-3].mean()
+                if prior_vol > 0:
+                    v_ratio = recent_vol / prior_vol
+                    if v_ratio > 1.3:
+                        vol_trend = "量增"
+                    elif v_ratio < 0.7:
+                        vol_trend = "量缩"
+                    else:
+                        vol_trend = "持平"
+
+            rsi_val = latest["rsi_14"]
+            rsi_status = "—"
+            if pd.notna(rsi_val):
+                if rsi_val > 80:
+                    rsi_status = "极度超买"
+                elif rsi_val > 70:
+                    rsi_status = "超买"
+                elif rsi_val < 20:
+                    rsi_status = "极度超卖"
+                elif rsi_val < 30:
+                    rsi_status = "超卖"
+                else:
+                    rsi_status = "正常"
+
+            ma20_val = latest["ma20"]
+            above_ma20 = bool(pd.notna(ma20_val) and c > ma20_val)
+
+            return {
+                "status": "ok",
+                "code": code,
+                "record_count": len(records),
+                "rsi_14": round(float(rsi_val), 2) if pd.notna(rsi_val) else None,
+                "rsi_status": rsi_status,
+                "ma20": round(float(ma20_val), 3) if pd.notna(ma20_val) else None,
+                "latest_pattern": pattern,
+                "volume_trend": vol_trend,
+                "above_ma20": above_ma20,
+                "latest_close": round(float(c), 3) if pd.notna(c) else None,
+                "records": records[-20:],  # 仅保留最近20根给下游
+            }
+        except Exception as exc:
+            logger.warning("[%s] 60分钟数据获取/计算失败: %s", code, exc)
+            return {"status": "no_data", "code": code, "note": str(exc)}
 
     def _enhance_context_with_sepa_quality_gate(
         self,
@@ -884,6 +1086,16 @@ class StockAnalysisPipeline:
             )
         )
 
+        # 60分钟数据注入（Classic 路径单轮增强用）
+        try:
+            code = context.get("code", "")
+            if code:
+                minutely = self._fetch_minutely_analysis(code, days=5)
+                if minutely.get("status") == "ok":
+                    enhanced["minutely_analysis"] = minutely
+        except Exception as exc:
+            logger.debug("[%s] 60分钟数据注入失败（不影响主流程）: %s", context.get("code", ""), exc)
+
         return enhanced
 
     def _attach_belong_boards_to_fundamental_context(
@@ -957,10 +1169,149 @@ class StockAnalysisPipeline:
         except Exception as e:
             logger.warning("[%s] Agent history prefetch failed: %s", code, e)
 
+    def _run_minutely_refinement(
+        self,
+        executor,
+        code: str,
+        stock_name: str,
+        daily_result: AnalysisResult,
+        minutely_data: Dict[str, Any],
+        report_language: str,
+    ) -> Optional[Dict[str, Any]]:
+        """执行60分钟第二轮精修分析（Agent路径）。
+
+        仅聚焦入场时机精修：60分钟VCP确认、RSI超买检查、MA20回踩机会。
+        返回 refinement dict，供合并到 AnalysisResult。
+        """
+        try:
+            # 提取日线关键结论用于第二轮上下文
+            dashboard = daily_result.dashboard or {}
+            core = dashboard.get("core_conclusion", {})
+            data_p = dashboard.get("data_perspective", {})
+            battle = dashboard.get("battle_plan", {})
+
+            stage = "未知"
+            if isinstance(data_p, dict):
+                stage = data_p.get("stage", "未知")
+
+            sepa_score = 0
+            if isinstance(data_p, dict):
+                sepa_score = data_p.get("sepa_score", 0)
+
+            vcp = ""
+            if isinstance(data_p, dict):
+                vcp = data_p.get("vcp_structure", "")
+                if isinstance(vcp, dict):
+                    vcp = f"收缩{vcp.get('contractions', '?')}次, 枢轴点{vcp.get('pivot_price', 'N/A')}"
+
+            entry_price = ""
+            if isinstance(battle, dict):
+                entry_price = battle.get("entry_price", "")
+            stop_loss = ""
+            if isinstance(battle, dict):
+                stop_loss = battle.get("stop_loss", "")
+
+            # 构建60分钟数据表格
+            records = minutely_data.get("records", [])[-10:]  # 最近10根
+            table_rows = ""
+            for r in records:
+                table_rows += (
+                    f"| {r.get('date', '')} {r.get('time', '')} | "
+                    f"{r.get('open', '-')} | {r.get('high', '-')} | "
+                    f"{r.get('low', '-')} | {r.get('close', '-')} | "
+                    f"{_format_volume(r.get('volume'))} |\n"
+                )
+
+            prompt = f"""# 60分钟入场时机精修（第二轮分析）
+
+## 日线分析结论（第一轮）
+- 阶段判定：{stage}
+- SEPA评分：{sepa_score}/48
+- VCP结构：{vcp}
+- 建议入场价：{entry_price}
+- 建议止损价：{stop_loss}
+- 日线操作建议：{daily_result.operation_advice}
+
+## 60分钟关键指标
+| 指标 | 数值 | 信号 |
+|------|------|------|
+| RSI(14) | {minutely_data.get('rsi_14', 'N/A')} | {minutely_data.get('rsi_status', '—')} |
+| MA20 | {minutely_data.get('ma20', 'N/A')} | {'价格在上方' if minutely_data.get('above_ma20') else '价格在下方/无数据'} |
+| 量趋势 | {minutely_data.get('volume_trend', '—')} | — |
+| 最新K线形态 | {minutely_data.get('latest_pattern', '—')} | — |
+
+## 60分钟近期走势（最近10根）
+| 时间 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |
+|------|------|------|------|------|--------|
+{table_rows}
+
+## 你的任务
+基于日线结论和60分钟数据， STRICTLY 回答以下问题：
+1. 60分钟是否呈现小型VCP或整理结构？（是/否/模糊）
+2. 60分钟RSI是否>80（极度超买不宜追）？
+3. 当前60分钟位置：突破中/回踩MA20/超买区/无结构
+4. 精确入场建议：立即入场 / 等待60分钟回踩MA20 / 放弃
+5. 若建议"等待"，触发条件是什么？（价格+时间）
+
+输出严格JSON格式（不要Markdown、不要分析过程、不要表格）：
+{{"minutely_structure": "...", "rsi_status": "...", "position": "...", "refined_entry": "...", "trigger_condition": "...", "confidence": "高/中/低"}}
+"""
+
+            ctx = {
+                "stock_code": code,
+                "stock_name": stock_name,
+                "report_language": report_language,
+                "formatted_data": prompt,
+            }
+            if report_language == "en":
+                msg = f"Refine entry timing for {code} using 60-minute data."
+            else:
+                msg = f"对股票 {code} 进行60分钟入场时机精修。"
+
+            logger.info("[%s] 启动60分钟第二轮精修分析", code)
+            agent_result = executor.run_once(msg, context=ctx)
+
+            # 尝试从 content 解析 JSON
+            content = agent_result.content or ""
+            import json
+            # 先尝试直接解析
+            try:
+                refinement = json.loads(content)
+                if isinstance(refinement, dict):
+                    return refinement
+            except json.JSONDecodeError:
+                pass
+            # 尝试提取 ```json 块
+            import re
+            m = re.search(r"```json\s*(.*?)\s*```", content, re.DOTALL)
+            if m:
+                try:
+                    refinement = json.loads(m.group(1))
+                    if isinstance(refinement, dict):
+                        return refinement
+                except json.JSONDecodeError:
+                    pass
+            # 兜底：尝试找到最外层 {...}（非贪婪，避免跨多个块误匹配）
+            m = re.search(r"\{.*?\}", content, re.DOTALL)
+            if m:
+                try:
+                    refinement = json.loads(m.group(0))
+                    if isinstance(refinement, dict):
+                        return refinement
+                except json.JSONDecodeError:
+                    pass
+
+            logger.warning("[%s] 60分钟精修结果JSON解析失败，返回原始文本", code)
+            return {"raw_text": content, "parse_error": True}
+
+        except Exception as exc:
+            logger.warning("[%s] 60分钟精修分析失败: %s", code, exc)
+            return None
+
     def _analyze_with_agent(
-        self, 
-        code: str, 
-        report_type: ReportType, 
+        self,
+        code: str,
+        report_type: ReportType,
         query_id: str,
         stock_name: str,
         realtime_quote: Any,
@@ -1102,6 +1453,30 @@ class StockAnalysisPipeline:
             )
             if result:
                 result.query_id = query_id
+
+            # Round 2: 60分钟精修（仅对买入/强烈买入信号启动）
+            if result and result.success:
+                try:
+                    should_refinement = result.operation_advice in ("买入", "强烈买入", "BUY", "STRONG_BUY")
+                    if not should_refinement and result.dashboard:
+                        # 兼容英文/多种表达
+                        core = result.dashboard.get("core_conclusion", {})
+                        action = str(core.get("action", result.operation_advice)).lower()
+                        should_refinement = action in ("买入", "强烈买入", "buy", "strong_buy", "strong buy")
+                    if should_refinement:
+                        minutely = self._fetch_minutely_analysis(code, days=5)
+                        if minutely.get("status") == "ok":
+                            refinement = self._run_minutely_refinement(
+                                executor, code, stock_name, result, minutely, report_language
+                            )
+                            if refinement:
+                                result.minutely_refinement = refinement
+                                logger.info("[%s] 60分钟精修完成: %s", code, refinement.get("refined_entry", "N/A"))
+                        else:
+                            logger.info("[%s] 60分钟数据不可用，跳过精修", code)
+                except Exception as exc:
+                    logger.warning("[%s] 60分钟精修阶段异常（不影响主结果）: %s", code, exc)
+
             # Agent weak integrity: placeholder fill only, no LLM retry
             if result and getattr(self.config, "report_integrity_enabled", False):
                 from src.analyzer import check_content_integrity, apply_placeholder_fill

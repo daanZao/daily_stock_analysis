@@ -558,6 +558,7 @@ class HistoryService:
                 current_price=clean_raw.get("current_price"),
                 change_pct=clean_raw.get("change_pct"),
                 model_used=clean_raw.get("model_used"),
+                minutely_refinement=clean_raw.get("minutely_refinement"),
             )
             # Backfill empty flat fields from dashboard for legacy consumers
             self._backfill_from_dashboard(result)

@@ -48,7 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [测试] 补齐 `task_queue` 轻量导入 stub 的股票代码规范化函数，恢复 `tests/test_task_queue_config_sync.py` 收集与运行。
 - [修复] 分析 Prompt 在注入 `trend_analysis` 前按最终 `trend_status` / `ma_alignment` 清洗互斥理由：空头结构移除看多理由、多头结构移除空头结构风险，并在事件/技术冲突与异常放量（>10 倍）时强制提示”事件先行、技术待确认”与量能降权；本次仅改动 `src/analyzer.py` 的 Prompt 清洗辅助逻辑并补充 `tests/test_analyzer_news_prompt.py` 回归用例，未触及 `src/config.py`、LiteLLM/provider、模型名、Base URL 或运行时配置清理/迁移入口。
 - [新功能] Agent 分析工具新增 `analyze_relative_strength`，替代原有 `get_limit_up_down_stats`（涨停计数）；新工具基于个股 vs 沪深300的 RS Rating（波动率调整，1-99分）、MA20上方占比、创20日新高次数、收益回撤比、波动率等多维度评分，映射到 SEPA 等级 S/A/B/C/D，解决涨停计数在 A 股实际场景中无法准确反映 SEPA 动量要求的问题
+- [改进] SEPA 数据门禁检查逻辑从"记录存在性"升级为"关键字段有效数值"：financial_reports 和 fundamental_context.earnings 中的 revenue/net_profit_parent/roe 等字段必须至少有一个包含有效数字（0 也算），避免空壳记录误导 LLM 输出"基本面数据缺失"
+- [新功能] Agent 路径新增60分钟K线第二轮精修分析：日线SEPA分析完成后，若结论为买入/强烈买入，自动启动第二轮 `run_once()` 调用，基于60分钟RSI/MA20/K线形态精修入场时机（立即入场/等待回踩/放弃）
+- [改进] Classic 路径单轮增强：`format_analysis_prompt()` 新增60分钟K线数据段落（RSI14/MA20/量趋势/最新K线形态/最近10根走势），LLM在单轮内即可完成日线+60分钟综合分析
+- [改进] `AnalysisResult` 新增 `minutely_refinement` 字段，用于持久化60分钟精修结论；`history_service._rebuild_analysis_result` 已兼容该字段的反序列化
 - [改进] Analyzer SEPA 动量验证 Prompt 格式重构：替换原有”涨停/跌停/炸板/连板”为 RS Rating、SEPA评分、MA20上方占比、趋势一致性、创20日新高次数、区间收益、最大回撤等真正反映 SEPA Trend Template 的指标
+- [改进] Agent SEPA skill 提示词（`src/agent/skills/defaults.py`）同步更新：P2-动量验证从涨停计数体系（S/A/B/C/F）全面替换为 RS Rating 体系（S/A/B/C/D），数据输入规范移除”60日内涨停/跌停记录”，绝对禁止清单同步更新为”禁止买入 C级/D级动量股票”
+- [修复] Pipeline 导入缺失的 `_format_volume`：`_run_minutely_refinement` 调用未从 `src.analyzer` 导入的模块级函数，触发 `NameError` 后被 `except Exception` 静默吞掉，导致 Agent 路径 60 分钟精修功能每次返回 `None` 完全不可用
+- [修复] Pipeline `_validate_least_resistance` 方法内局部导入 `BuySignal` 提到文件顶部统一导入，减少运行时重复开销
+- [修复] Pipeline `_validate_least_resistance` 注释更新：明确说明当前仅覆盖做多方向的最小阻力校验，避免与”趋势、量能、RS 都指向同一方向”的笼统描述产生歧义
+- [修复] Pipeline `_run_minutely_refinement` JSON 兜底正则从贪婪匹配 `\{.*\}` 改为非贪婪 `\{.*?\}`，避免跨多个 JSON 块或 Markdown 代码块时误匹配到过大的非法范围
+- [修复] `analyzer._format_volume` 增加 `float()` 容错转换：即使传入字符串型 volume 也能安全处理，避免 `TypeError`
 - [修复] Pipeline Issue #234 realtime override 增加盘前状态检测：当 volume 为 0/None 且 open=high=low=close 时跳过 override，保留昨日真实交易数据，避免 LLM 看到”一字”形态产生涨停幻觉（如 000792.SZ 在 09:15 盘前被误判为”一字涨停”）
 - [修复] `_backfill_analysis_fields` 中 `news_summary` 解析兼容字符串列表元素：LLM 返回的 `latest_news` 列表中元素可能是 str 而非 dict，增加类型检测避免 `AttributeError: 'str' object has no attribute 'get'`
 - [文档] docs/agentTOOLS.md 更新：`get_limit_up_down_stats` 替换为 `analyze_relative_strength`，更新 SEPA 映射附录

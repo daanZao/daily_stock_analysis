@@ -386,6 +386,10 @@ def _format_volume(volume: Optional[float]) -> str:
     """格式化成交量显示（模块级函数）"""
     if volume is None:
         return 'N/A'
+    try:
+        volume = float(volume)
+    except (TypeError, ValueError):
+        return 'N/A'
     if volume >= 1e8:
         return f"{volume / 1e8:.2f} 亿股"
     elif volume >= 1e4:
@@ -526,6 +530,35 @@ def format_analysis_prompt(
 | 创20日新高次数 | {sepa.get('new_high_count', 'N/A')} 次 | 动量持续性指标 |
 """
 
+    # --- 60分钟K线精修数据（Classic路径单轮增强） ---
+    minutely = context.get('minutely_analysis', {}) if isinstance(context, dict) else {}
+    if minutely and minutely.get('status') == 'ok':
+        records = minutely.get('records', [])[-10:]  # 最近10根
+        table_rows = ""
+        for r in records:
+            _vol = _format_volume(r.get('volume'))
+            table_rows += (
+                f"| {r.get('date', '')} {r.get('time', '')} | "
+                f"{r.get('open', '-')} | {r.get('high', '-')} | "
+                f"{r.get('low', '-')} | {r.get('close', '-')} | {_vol} |\n"
+            )
+        prompt += f"""
+### 60分钟K线精修数据（最近5个交易日）
+| 指标 | 数值 | 信号 |
+|------|------|------|
+| RSI(14) | {minutely.get('rsi_14', 'N/A')} | {minutely.get('rsi_status', '—')} |
+| MA20 | {minutely.get('ma20', 'N/A')} | {'价格在上方' if minutely.get('above_ma20') else '价格在下方/无数据'} |
+| 量趋势 | {minutely.get('volume_trend', '—')} | — |
+| 最新K线形态 | {minutely.get('latest_pattern', '—')} | — |
+
+### 60分钟近期走势（最近10根）
+| 时间 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |
+|------|------|------|------|------|--------|
+{table_rows}
+
+> 基于上述60分钟数据，请在分析中的"60分钟精修"部分给出精确入场时机建议。
+"""
+
     # 添加实时行情数据（量比、换手率等）
     if 'realtime' in context:
         rt = context['realtime']
@@ -663,19 +696,41 @@ def format_analysis_prompt(
 - 预告摘要: {f.get('forecast_abstract', '-')}
 - 净利润变动: {f.get('chg_min', '-')}%～{f.get('chg_max', '-')}%\n"""
 
-    # 添加筹码分布数据
+    # 添加筹码分布数据（最小阻力视角）
     if 'chip' in context:
         chip = context['chip']
         profit_ratio = chip.get('profit_ratio', 0)
+        concentration_90 = chip.get('concentration_90', 0) or 0
+        avg_cost = chip.get('avg_cost', 0) or 0
+        today_close = today.get('close', 0) or 0
+
+        # 最小阻力方向判断
+        least_resistance = "不明"
+        if concentration_90 < 0.08 and profit_ratio > 0.3:
+            least_resistance = "向上（筹码高度集中+获利适中，阻力极小）"
+        elif concentration_90 > 0.30:
+            least_resistance = "无序（筹码极度分散，多空拉锯）"
+        elif avg_cost > 0 and today_close > avg_cost * 1.15 and concentration_90 > 0.25:
+            least_resistance = "向下（现价远离成本+下方真空，回调无承接）"
+        elif profit_ratio > 0.85 and concentration_90 > 0.20:
+            least_resistance = "向下（获利盘极高且发散，抛压重重）"
+        elif avg_cost > 0 and today_close > avg_cost * 1.05:
+            least_resistance = "向上（股价站上成本区，上方真空）"
+
         prompt += f"""
-### 筹码分布数据（效率指标）
-| 指标 | 数值 | 健康标准 |
+### 筹码阻力地图（最小阻力方向）
+| 指标 | 数值 | 阻力含义 |
 |------|------|----------|
-| **获利比例** | **{profit_ratio:.1%}** | 70-90%时警惕 |
-| 平均成本 | {chip.get('avg_cost', 'N/A')} 元 | 现价应高于5-15% |
-| 90%筹码集中度 | {chip.get('concentration_90', 0):.2%} | <15%为集中 |
-| 70%筹码集中度 | {chip.get('concentration_70', 0):.2%} | |
+| **最小阻力方向** | **{least_resistance}** | 核心判断 |
+| **获利比例** | **{profit_ratio:.1%}** | >85%且发散=抛压大；30-70%=健康 |
+| 平均成本 | {avg_cost if avg_cost else 'N/A'} 元 | 现价高于成本=支撑；远离成本=真空 |
+| 90%筹码集中度 | {concentration_90:.2%} | <8%高度集中（变盘）；>30%分散（无序） |
 | 筹码状态 | {chip.get('chip_status', unknown_text)} | |
+
+> **最小阻力法则**：筹码分布回答的是"价格往某个方向运动会遇到多少反向力量"。
+> - 单峰密集+股价站上峰顶 = 上方真空，轻轻一推就上去
+> - 双峰对峙 = 上下各有压力/支撑，价格被夹住
+> - 获利盘极高且筹码发散 = 到处都是解套/获利抛压，突破阻力极大
 """
 
     # 添加趋势分析结果
@@ -877,7 +932,8 @@ def fill_price_position_if_needed(
         dash = result.dashboard
         dp = dash.get("data_perspective") or {}
         dash["data_perspective"] = dp
-        pp = dp.get("price_position") or {}
+        pp = dp.get("price_position")
+        pp = pp if isinstance(pp, dict) else {}
 
         computed: Dict[str, Any] = {}
         if trend_result:
@@ -1040,6 +1096,9 @@ class AnalysisResult:
     # ========== 历史对比（Report Engine P0）==========
     query_id: Optional[str] = None  # 本次分析 query_id，用于历史对比时排除本次记录
 
+    # ========== 60分钟精修（第二轮分析）==========
+    minutely_refinement: Optional[Dict[str, Any]] = None  # Agent路径第二轮60分钟精修结果
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
@@ -1076,6 +1135,7 @@ class AnalysisResult:
             'current_price': self.current_price,
             'change_pct': self.change_pct,
             'model_used': self.model_used,
+            'minutely_refinement': self.minutely_refinement,
         }
 
     def get_core_conclusion(self) -> str:
@@ -1096,7 +1156,9 @@ class AnalysisResult:
     def get_sniper_points(self) -> Dict[str, str]:
         """获取狙击点位"""
         if self.dashboard and 'battle_plan' in self.dashboard:
-            return self.dashboard['battle_plan'].get('sniper_points', {})
+            sp = self.dashboard['battle_plan'].get('sniper_points')
+            if isinstance(sp, dict):
+                return sp
         return {}
 
     def get_checklist(self) -> List[str]:
