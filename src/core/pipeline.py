@@ -987,6 +987,7 @@ class StockAnalysisPipeline:
                     sepa['trend_consistency'] = rs_result.get('trend_consistency')
                     sepa['total_return_pct'] = rs_result.get('total_return_pct')
                     sepa['max_drawdown_pct'] = rs_result.get('max_drawdown_pct')
+                    sepa['new_high_count'] = rs_result.get('new_high_count')
             except Exception as exc:
                 logger.warning("[%s] SEPA field injection failed: %s", code, exc)
             enhanced['sepa_analysis'] = sepa

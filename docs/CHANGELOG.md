@@ -53,6 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 修正 LLM 渠道测试中 `Model disabled` 被误报为网络异常的问题，并在失败提示中展示本次实际测试模型。
 - [chore] 清理仓库根目录：移除误入库的 `.codex`、`review.md` 跟踪记录，将 smoke 测试入口迁移到 `scripts/`、环境检查脚本迁移为 `scripts/check_env.py`，并将 LiteLLM YAML 示例迁移到 `docs/examples/`。
 - [新功能] Web 设置页新增通知渠道一键测试，支持临时配置、耗时与脱敏 attempts 展示。
+- [改进] SEPA 数据门禁检查逻辑从"记录存在性"升级为"关键字段有效数值"：financial_reports 和 fundamental_context.earnings 中的 revenue/net_profit_parent/roe 等字段必须至少有一个包含有效数字（0 也算），避免空壳记录误导 LLM 输出"基本面数据缺失"
+- [改进] Agent SEPA skill 提示词（`src/agent/skills/defaults.py`）同步更新：P2-动量验证从涨停计数体系（S/A/B/C/F）全面替换为 RS Rating 体系（S/A/B/C/D），数据输入规范移除"60日内涨停/跌停记录"，绝对禁止清单同步更新为"禁止买入 C级/D级动量股票"
+- [改进] Classic 路径单轮增强：`format_analysis_prompt()` 新增60分钟K线数据段落（RSI14/MA20/量趋势/最新K线形态/最近10根走势），LLM在单轮内即可完成日线+60分钟综合分析
+- [改进] `AnalysisResult` 新增 `minutely_refinement` 字段，用于持久化60分钟精修结论；`history_service._rebuild_analysis_result` 已兼容该字段的反序列化
+- [改进] Analyzer SEPA 动量验证 Prompt 格式重构：替换原有"涨停/跌停/炸板/连板"为 RS Rating、SEPA评分、MA20上方占比、趋势一致性、创20日新高次数、区间收益、最大回撤等真正反映 SEPA Trend Template 的指标
+- [改进] Pipeline `_validate_least_resistance` 方法内局部导入 `BuySignal` 提到文件顶部统一导入，减少运行时重复开销；注释更新明确说明当前仅覆盖做多方向的最小阻力校验
+- [改进] Pipeline `_run_minutely_refinement` JSON 兜底正则从贪婪匹配 `\{.*\}` 改为非贪婪 `\{.*?\}`，避免跨多个 JSON 块或 Markdown 代码块时误匹配到过大的非法范围
+- [改进] `analyzer._format_volume` 增加 `float()` 容错转换：即使传入字符串型 volume 也能安全处理，避免 `TypeError`
+- [修复] Pipeline 导入缺失的 `_format_volume`：`_run_minutely_refinement` 调用未从 `src.analyzer` 导入的模块级函数，触发 `NameError` 后被 `except Exception` 静默吞掉，导致 Agent 路径 60 分钟精修功能每次返回 `None` 完全不可用
+- [修复] Pipeline `_enhance_context` 补注入 `new_high_count`：`analyze_relative_strength` 工具已返回该字段且 prompt 中已使用，但 pipeline 未将其写入 `sepa_analysis`，导致 prompt 中始终显示 `N/A`
+- [修复] Pipeline Issue #234 realtime override 增加盘前状态检测：当 volume 为 0/None 且 open=high=low=close 时跳过 override，保留昨日真实交易数据，避免 LLM 看到"一字"形态产生涨停幻觉（如 000792.SZ 在 09:15 盘前被误判为"一字涨停"）
+- [修复] `_backfill_analysis_fields` 中 `news_summary` 解析兼容字符串列表元素：LLM 返回的 `latest_news` 列表中元素可能是 str 而非 dict，增加类型检测避免 `AttributeError: 'str' object has no attribute 'get'`
+- [文档] docs/agentTOOLS.md 更新：`get_limit_up_down_stats` 替换为 `analyze_relative_strength`，更新 SEPA 映射附录
 
 ## [3.15.0] - 2026-05-05
 
