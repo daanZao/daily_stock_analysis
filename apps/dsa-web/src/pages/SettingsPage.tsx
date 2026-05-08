@@ -9,6 +9,7 @@ import {
   ChangePasswordCard,
   IntelligentImport,
   LLMChannelEditor,
+  NotificationTestPanel,
   SettingsCategoryNav,
   SettingsAlert,
   SettingsField,
@@ -655,6 +656,13 @@ const SettingsPage: React.FC = () => {
             ) : null}
             {activeCategory === 'system' && passwordChangeable ? (
               <ChangePasswordCard />
+            ) : null}
+            {activeCategory === 'notification' ? (
+              <NotificationTestPanel
+                items={rawActiveItems.map((item) => ({ key: item.key, value: String(item.value ?? '') }))}
+                maskToken={maskToken}
+                disabled={isSaving || isLoading}
+              />
             ) : null}
             {activeItems.length ? (
               <SettingsSectionCard
