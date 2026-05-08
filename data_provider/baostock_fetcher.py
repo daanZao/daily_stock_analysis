@@ -19,7 +19,7 @@ import os
 import re
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
-from typing import Optional, Generator
+from typing import Optional, Generator, Dict, Any, List
 
 import pandas as pd
 from tenacity import (
@@ -471,6 +471,260 @@ class BaostockFetcher(BaseFetcher):
         except Exception as e:
             logger.warning(f"保存 CSV 失败: {e}")
             return None
+
+    def _fetch_raw_minutely_data(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        frequency: str = "60",
+    ) -> pd.DataFrame:
+        """
+        从 Baostock 获取60分钟K线原始数据
+
+        Args:
+            stock_code: 股票代码
+            start_date: 开始日期 YYYY-MM-DD
+            end_date: 结束日期 YYYY-MM-DD
+            frequency: 频率，默认 "60" 表示60分钟
+
+        Returns:
+            原始数据 DataFrame
+        """
+        if _is_us_code(stock_code):
+            raise DataFetchError(f"BaostockFetcher 不支持美股 {stock_code}")
+        if _is_hk_market(stock_code):
+            raise DataFetchError(f"BaostockFetcher 不支持港股 {stock_code}")
+        if is_bse_code(stock_code):
+            raise DataFetchError(f"BaostockFetcher 不支持北交所 {stock_code}")
+
+        bs_code = self._convert_stock_code(stock_code)
+        logger.debug(
+            f"调用 Baostock query_history_k_data_plus({bs_code}, {start_date}, {end_date}, freq={frequency})"
+        )
+
+        with self._baostock_session() as bs:
+            rs = bs.query_history_k_data_plus(
+                code=bs_code,
+                fields="date,time,open,high,low,close,volume,amount",
+                start_date=start_date,
+                end_date=end_date,
+                frequency=frequency,
+                adjustflag="2",  # 前复权
+            )
+
+            if rs.error_code != '0':
+                raise DataFetchError(f"Baostock 60分钟查询失败: {rs.error_msg}")
+
+            data_list = []
+            while rs.next():
+                data_list.append(rs.get_row_data())
+
+            if not data_list:
+                raise DataFetchError(f"Baostock 未查询到 {stock_code} 的60分钟数据")
+
+            df = pd.DataFrame(data_list, columns=rs.fields)
+            return df
+
+    def _normalize_minutely_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
+        """
+        标准化60分钟K线数据
+
+        Baostock time 格式: YYYYMMDDHHMMSSsss
+        拆分为 date (YYYY-MM-DD) 和 time (HHMMSS)
+        """
+        df = df.copy()
+
+        # Baostock 返回的都是字符串，需要转换
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'amount']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # 解析 time 字段: YYYYMMDDHHMMSSsss -> date + time
+        if 'time' in df.columns:
+            df['time'] = df['time'].astype(str)
+            # 取前8位作为日期，第9-14位作为时间
+            df['date'] = df['time'].str[:8]
+            df['time'] = df['time'].str[8:14]
+            df['date'] = pd.to_datetime(df['date'], format='%Y%m%d').dt.strftime('%Y-%m-%d')
+
+        # 计算涨跌幅 (若 Baostock 未返回)
+        if 'pct_chg' not in df.columns:
+            df['pct_chg'] = df['close'].pct_change() * 100
+
+        df['code'] = stock_code
+
+        keep_cols = ['code', 'date', 'time', 'open', 'high', 'low', 'close', 'volume', 'amount', 'pct_chg']
+        existing = [c for c in keep_cols if c in df.columns]
+        return df[existing].copy()
+
+    def get_minutely_data(
+        self,
+        stock_code: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        days: int = 120,
+        frequency: str = "60",
+    ) -> pd.DataFrame:
+        """
+        获取60分钟K线数据（统一入口）
+
+        Args:
+            stock_code: 股票代码
+            start_date: 开始日期（可选）
+            end_date: 结束日期（可选，默认今天）
+            days: 获取天数（当 start_date 未指定时使用）
+            frequency: 频率，默认 "60"
+
+        Returns:
+            标准化的 DataFrame
+        """
+        if end_date is None:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+        if start_date is None:
+            start_dt = datetime.strptime(end_date, '%Y-%m-%d') - timedelta(days=days * 2)
+            start_date = start_dt.strftime('%Y-%m-%d')
+
+        logger.info(
+            f"[{self.name}] 开始获取 {stock_code} 60分钟数据: 范围={start_date} ~ {end_date}"
+        )
+
+        raw_df = self._fetch_raw_minutely_data(stock_code, start_date, end_date, frequency)
+        df = self._normalize_minutely_data(raw_df, stock_code)
+
+        # 数据清洗
+        df = df.dropna(subset=['close', 'volume'])
+        df = df.sort_values(['date', 'time'], ascending=True).reset_index(drop=True)
+
+        logger.info(f"[{self.name}] {stock_code} 60分钟数据获取成功: {len(df)} 条")
+        return df
+
+    def get_growth_data(
+        self,
+        stock_code: str,
+        year: int,
+        quarter: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        获取季频成长能力数据（query_growth_data）
+
+        Args:
+            stock_code: 股票代码
+            year: 年份
+            quarter: 季度 (1-4)
+
+        Returns:
+            字典或 None
+        """
+        try:
+            bs_code = self._convert_stock_code(stock_code)
+            with self._baostock_session() as bs:
+                rs = bs.query_growth_data(code=bs_code, year=year, quarter=quarter)
+                if rs.error_code != '0':
+                    logger.warning(
+                        f"Baostock query_growth_data 失败: {rs.error_msg}"
+                    )
+                    return None
+
+                data_list = []
+                while rs.next():
+                    data_list.append(rs.get_row_data())
+
+                if not data_list:
+                    return None
+
+                fields = rs.fields
+                row = data_list[0]
+
+                def _get(field: str) -> Optional[str]:
+                    try:
+                        idx = fields.index(field)
+                        return row[idx] if idx < len(row) else None
+                    except ValueError:
+                        return None
+
+                return {
+                    'code': stock_code,
+                    'year': year,
+                    'quarter': quarter,
+                    'pub_date': _get('pubDate'),
+                    'stat_date': _get('statDate'),
+                    'yoy_equity': _get('YOYEquity'),
+                    'yoy_asset': _get('YOYAsset'),
+                    'yoy_ni': _get('YOYNI'),
+                    'yoy_eps_basic': _get('YOYEPSBasic'),
+                    'yoy_pni': _get('YOYPNI'),
+                    'raw': dict(zip(fields, row)),
+                }
+        except Exception as e:
+            logger.warning(f"Baostock 获取成长数据失败 {stock_code}: {e}")
+            return None
+
+    def get_forecast_report(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        获取季频公司业绩预告（query_forecast_report）
+
+        Args:
+            stock_code: 股票代码
+            start_date: 开始日期 YYYY-MM-DD
+            end_date: 结束日期 YYYY-MM-DD
+
+        Returns:
+            记录列表
+        """
+        try:
+            bs_code = self._convert_stock_code(stock_code)
+            with self._baostock_session() as bs:
+                rs = bs.query_forecast_report(
+                    code=bs_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if rs.error_code != '0':
+                    logger.warning(
+                        f"Baostock query_forecast_report 失败: {rs.error_msg}"
+                    )
+                    return []
+
+                data_list = []
+                while rs.next():
+                    data_list.append(rs.get_row_data())
+
+                if not data_list:
+                    return []
+
+                fields = rs.fields
+                results = []
+                for row in data_list:
+                    def _get(field: str) -> Optional[str]:
+                        try:
+                            idx = fields.index(field)
+                            return row[idx] if idx < len(row) else None
+                        except ValueError:
+                            return None
+
+                    results.append({
+                        'code': stock_code,
+                        'forecast_date': _get('forecastDate'),
+                        'report_date': _get('reportDate'),
+                        'forecast_type': _get('forecastType'),
+                        'forecast_abstract': _get('forecastAbstract'),
+                        'chg_min': _get('forecastChgMin'),
+                        'chg_max': _get('forecastChgMax'),
+                        'net_profit_min': _get('forecastNetProfitMin'),
+                        'net_profit_max': _get('forecastNetProfitMax'),
+                        'raw': dict(zip(fields, row)),
+                    })
+                return results
+        except Exception as e:
+            logger.warning(f"Baostock 获取业绩预告失败 {stock_code}: {e}")
+            return []
 
 
 if __name__ == "__main__":

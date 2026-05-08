@@ -22,7 +22,6 @@ from json_repair import repair_json
 from litellm import Router
 
 from src.agent.llm_adapter import get_thinking_extra_body
-from src.agent.skills.defaults import CORE_TRADING_SKILL_POLICY_ZH
 from src.config import (
     Config,
     extra_litellm_params,
@@ -224,16 +223,12 @@ def apply_placeholder_fill(result: "AnalysisResult", missing_fields: List[str]) 
         elif field == "dashboard.battle_plan.sniper_points.stop_loss":
             if not result.dashboard:
                 result.dashboard = {}
-            battle_plan = result.dashboard.get("battle_plan")
-            if not isinstance(battle_plan, dict):
-                battle_plan = {}
-                result.dashboard["battle_plan"] = battle_plan
-            sniper_points = battle_plan.get("sniper_points")
-            if not isinstance(sniper_points, dict):
-                sniper_points = {}
-                battle_plan["sniper_points"] = sniper_points
-            if _is_invalid_stop_loss(sniper_points.get("stop_loss")):
-                sniper_points["stop_loss"] = placeholder
+            if "battle_plan" not in result.dashboard:
+                result.dashboard["battle_plan"] = {}
+            sp = result.dashboard["battle_plan"].get("sniper_points")
+            if not isinstance(sp, dict):
+                result.dashboard["battle_plan"]["sniper_points"] = {}
+            result.dashboard["battle_plan"]["sniper_points"]["stop_loss"] = placeholder
 
 
 # ---------- chip_structure fallback (Issue #589) ----------
@@ -491,6 +486,480 @@ def _sanitize_trend_analysis_for_prompt(
     return trend_dict
 
 
+def _format_volume(volume: Optional[float]) -> str:
+    """格式化成交量显示（模块级函数）"""
+    if volume is None:
+        return 'N/A'
+    try:
+        volume = float(volume)
+    except (TypeError, ValueError):
+        return 'N/A'
+    if volume >= 1e8:
+        return f"{volume / 1e8:.2f} 亿股"
+    elif volume >= 1e4:
+        return f"{volume / 1e4:.2f} 万股"
+    else:
+        return f"{volume:.0f} 股"
+
+
+def _format_amount(amount: Optional[float]) -> str:
+    """格式化成交额显示（模块级函数）"""
+    if amount is None:
+        return 'N/A'
+    if amount >= 1e8:
+        return f"{amount / 1e8:.2f} 亿元"
+    elif amount >= 1e4:
+        return f"{amount / 1e4:.2f} 万元"
+    else:
+        return f"{amount:.0f} 元"
+
+
+def format_analysis_prompt(
+    context: Dict[str, Any],
+    stock_name: str,
+    news_context: Optional[str] = None,
+    report_language: str = "zh",
+    news_window_days: Optional[int] = None,
+    use_legacy_default_prompt: bool = False,
+) -> str:
+    """
+    将股票分析上下文格式化为 LLM prompt 数据部分（模块级函数，无 self 依赖）。
+
+    包含：技术指标、实时行情（量比/换手率）、筹码分布、趋势分析、新闻。
+    不包含输出格式要求（由调用方根据场景追加）。
+    """
+    code = context.get('code', 'Unknown')
+    report_language = normalize_report_language(report_language)
+
+    unknown_text = get_unknown_text(report_language)
+
+    today = context.get('today', {}) if isinstance(context, dict) else {}
+
+    # ========== 构建决策仪表盘格式的输入 ==========
+    prompt = f"""# 决策仪表盘分析请求
+
+## 📊 股票基础信息
+| 项目 | 数据 |
+|------|------|
+| 股票代码 | **{code}** |
+| 股票名称 | **{stock_name}** |
+| 分析日期 | {context.get('date', unknown_text)} |
+
+---
+
+## 📈 技术面数据
+
+### 今日行情
+| 指标 | 数值 |
+|------|------|
+| 收盘价 | {today.get('close', 'N/A')} 元 |
+| 开盘价 | {today.get('open', 'N/A')} 元 |
+| 最高价 | {today.get('high', 'N/A')} 元 |
+| 最低价 | {today.get('low', 'N/A')} 元 |
+| 涨跌幅 | {today.get('pct_chg', 'N/A')}% |
+| 成交量 | {_format_volume(today.get('volume'))} |
+| 成交额 | {_format_amount(today.get('amount'))} |
+
+### 均线系统（关键判断指标）
+| 均线 | 数值 | 说明 |
+|------|------|------|
+| MA5 | {today.get('ma5', 'N/A')} | 短期趋势线 |
+| MA10 | {today.get('ma10', 'N/A')} | 中短期趋势线 |
+| MA20 | {today.get('ma20', 'N/A')} | 中期趋势线 |
+| 均线形态 | {context.get('ma_status', unknown_text)} | 多头/空头/缠绕 |
+"""
+
+    # === 完整技术指标（来自 StockDaily 预计算）===
+    if today.get('macd_dif') is not None:
+        prompt += f"""
+### 技术指标（基于2年完整历史计算）
+| 指标 | 数值 | 信号 |
+|------|------|------|
+| MACD DIF | {today.get('macd_dif', 'N/A')} | {today.get('macd_signal', '-')} |
+| MACD DEA | {today.get('macd_dea', 'N/A')} | |
+| MACD BAR | {today.get('macd_bar', 'N/A')} | |
+| RSI(6) | {today.get('rsi_6', 'N/A')} | {today.get('rsi_signal', '-')} |
+| RSI(12) | {today.get('rsi_12', 'N/A')} | |
+| RSI(24) | {today.get('rsi_24', 'N/A')} | |
+| KDJ K/D/J | {today.get('kdj_k', 'N/A')} / {today.get('kdj_d', 'N/A')} / {today.get('kdj_j', 'N/A')} | {today.get('kdj_signal', '-')} |
+| 乖离率 MA5 | {today.get('bias_ma5', 'N/A')}% | |
+| 乖离率 MA10 | {today.get('bias_ma10', 'N/A')}% | |
+| 乖离率 MA20 | {today.get('bias_ma20', 'N/A')}% | |
+| BOLL 上轨 | {today.get('boll_upper', 'N/A')} | |
+| BOLL 中轨 | {today.get('boll_mid', 'N/A')} | |
+| BOLL 下轨 | {today.get('boll_lower', 'N/A')} | |
+| K线形态 | {today.get('candle_pattern') or '无显著形态'} | |
+"""
+
+    # 最近5日指标趋势
+    recent = context.get('recent_indicators', []) if isinstance(context, dict) else []
+    if len(recent) >= 3:
+        prompt += "\n### 最近5日指标趋势\n"
+        prompt += "| 日期 | 收盘 | MACD DIF | RSI(6) | KDJ K | 乖离MA5 | K线形态 |\n"
+        prompt += "|------|------|----------|--------|-------|---------|----------|\n"
+        for row in recent[:5]:
+            d = row.get('date', '-')
+            if hasattr(d, 'isoformat'):
+                d = d.isoformat()
+            prompt += (
+                f"| {d} | {row.get('close', '-')} | {row.get('macd_dif', '-')} | "
+                f"{row.get('rsi_6', '-')} | {row.get('kdj_k', '-')} | "
+                f"{row.get('bias_ma5', '-')}% | {row.get('candle_pattern') or '-'} |\n"
+            )
+
+    # --- SEPA 趋势模板数据注入 ---
+    sepa = context.get('sepa_analysis', {}) if isinstance(context, dict) else {}
+    if sepa:
+        prompt += f"""
+### 趋势模板数据（SEPA）
+| 指标 | 数值 | 状态 |
+|------|------|------|
+| MA50 | {sepa.get('ma50', 'N/A')} | {"价格在上方" if sepa.get('ma50') and today.get('close') and today.get('close') > sepa.get('ma50') else "价格在下方/无数据"} |
+| MA150 | {sepa.get('ma150', 'N/A')} | {"价格在上方" if sepa.get('ma150') and today.get('close') and today.get('close') > sepa.get('ma150') else "价格在下方/无数据"} |
+| MA200 | {sepa.get('ma200', 'N/A')} | {"价格在上方" if sepa.get('ma200') and today.get('close') and today.get('close') > sepa.get('ma200') else "价格在下方/无数据"} |
+| 52周高点 | {sepa.get('high_52w', 'N/A')} | 距高点 {sepa.get('pct_from_52w_high', 'N/A')}% |
+| 52周低点 | {sepa.get('low_52w', 'N/A')} | 距低点 {sepa.get('pct_from_52w_low', 'N/A')}% |
+| RS相对强度 | {sepa.get('rs_rank_pct', 'N/A')} | {"通过(RS>=70)" if sepa.get('pass_sepa_rs_70') else "未通过/无数据"} |
+
+### 动量验证（60日）—— 相对强度与趋势质量
+| 指标 | 数值 | 说明 |
+|------|------|------|
+| **RS Rating** | {sepa.get('rs_rating', 'N/A')} / 100 | SEPA要求>=80（vs沪深300，波动率调整） |
+| **SEPA评分** | {sepa.get('sepa_score', 'N/A')} | 多因子综合得分（0-100） |
+| **动量等级** | {sepa.get('momentum_grade', 'N/A')} | {sepa.get('grade_meaning', '')} |
+| 区间收益 | {sepa.get('total_return_pct', 'N/A')}% | 60日总收益率 |
+| 最大回撤 | {sepa.get('max_drawdown_pct', 'N/A')}% | 期间最大回撤 |
+| MA20上方占比 | {sepa.get('above_ma20_ratio', 'N/A') if isinstance(sepa.get('above_ma20_ratio'), str) else f"{sepa.get('above_ma20_ratio')*100:.1f}%" if sepa.get('above_ma20_ratio') is not None else 'N/A'} | 趋势持续性（SEPA要求大部分时间>MA20） |
+| 趋势一致性 | {sepa.get('trend_consistency', 'N/A') if isinstance(sepa.get('trend_consistency'), str) else f"{sepa.get('trend_consistency')*100:.1f}%" if sepa.get('trend_consistency') is not None else 'N/A'} | 价格与MA20同向运动天数占比 |
+| 创20日新高次数 | {sepa.get('new_high_count', 'N/A')} 次 | 动量持续性指标 |
+"""
+
+    # --- 60分钟K线精修数据（Classic路径单轮增强） ---
+    minutely = context.get('minutely_analysis', {}) if isinstance(context, dict) else {}
+    if minutely and minutely.get('status') == 'ok':
+        records = minutely.get('records', [])[-10:]  # 最近10根
+        table_rows = ""
+        for r in records:
+            _vol = _format_volume(r.get('volume'))
+            table_rows += (
+                f"| {r.get('date', '')} {r.get('time', '')} | "
+                f"{r.get('open', '-')} | {r.get('high', '-')} | "
+                f"{r.get('low', '-')} | {r.get('close', '-')} | {_vol} |\n"
+            )
+        prompt += f"""
+### 60分钟K线精修数据（最近5个交易日）
+| 指标 | 数值 | 信号 |
+|------|------|------|
+| RSI(14) | {minutely.get('rsi_14', 'N/A')} | {minutely.get('rsi_status', '—')} |
+| MA20 | {minutely.get('ma20', 'N/A')} | {'价格在上方' if minutely.get('above_ma20') else '价格在下方/无数据'} |
+| 量趋势 | {minutely.get('volume_trend', '—')} | — |
+| 最新K线形态 | {minutely.get('latest_pattern', '—')} | — |
+
+### 60分钟近期走势（最近10根）
+| 时间 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |
+|------|------|------|------|------|--------|
+{table_rows}
+
+> 基于上述60分钟数据，请在分析中的"60分钟精修"部分给出精确入场时机建议。
+"""
+
+    # 添加实时行情数据（量比、换手率等）
+    if 'realtime' in context:
+        rt = context['realtime']
+        prompt += f"""
+### 实时行情增强数据
+| 指标 | 数值 | 解读 |
+|------|------|------|
+| 当前价格 | {rt.get('price', 'N/A')} 元 | |
+| **量比** | **{rt.get('volume_ratio', 'N/A')}** | {rt.get('volume_ratio_desc', '')} |
+| **换手率** | **{rt.get('turnover_rate', 'N/A')}%** | |
+| 市盈率(动态) | {rt.get('pe_ratio', 'N/A')} | |
+| 市净率 | {rt.get('pb_ratio', 'N/A')} | |
+| 总市值 | {_format_amount(rt.get('total_mv'))} | |
+| 流通市值 | {_format_amount(rt.get('circ_mv'))} | |
+| 60日涨跌幅 | {rt.get('change_60d', 'N/A')}% | 中期表现 |
+"""
+
+    # 添加财报与分红（价值投资口径）
+    fundamental_context = context.get("fundamental_context") if isinstance(context, dict) else None
+    earnings_block = (
+        fundamental_context.get("earnings", {})
+        if isinstance(fundamental_context, dict)
+        else {}
+    )
+    earnings_data = (
+        earnings_block.get("data", {})
+        if isinstance(earnings_block, dict)
+        else {}
+    )
+    financial_report = (
+        earnings_data.get("financial_report", {})
+        if isinstance(earnings_data, dict)
+        else {}
+    )
+    dividend_metrics = (
+        earnings_data.get("dividend", {})
+        if isinstance(earnings_data, dict)
+        else {}
+    )
+    if isinstance(financial_report, dict) or isinstance(dividend_metrics, dict):
+        financial_report = financial_report if isinstance(financial_report, dict) else {}
+        dividend_metrics = dividend_metrics if isinstance(dividend_metrics, dict) else {}
+        ttm_yield = dividend_metrics.get("ttm_dividend_yield_pct", "N/A")
+        ttm_cash = dividend_metrics.get("ttm_cash_dividend_per_share", "N/A")
+        ttm_count = dividend_metrics.get("ttm_event_count", "N/A")
+        report_date = financial_report.get("report_date", "N/A")
+        prompt += f"""
+### 财报与分红（价值投资口径）
+| 指标 | 数值 | 说明 |
+|------|------|------|
+| 最近报告期 | {report_date} | 来自结构化财报字段 |
+| 营业收入 | {financial_report.get('revenue', 'N/A')} | |
+| 归母净利润 | {financial_report.get('net_profit_parent', 'N/A')} | |
+| 经营现金流 | {financial_report.get('operating_cash_flow', 'N/A')} | |
+| ROE | {financial_report.get('roe', 'N/A')} | |
+| 近12个月每股现金分红 | {ttm_cash} | 仅现金分红、税前口径 |
+| TTM 股息率 | {ttm_yield} | 公式：近12个月每股现金分红 / 当前价格 × 100% |
+| TTM 分红事件数 | {ttm_count} | |
+
+> 若上述字段为 N/A 或缺失，请明确写"数据缺失，无法判断"，禁止编造。
+"""
+
+    # 添加成长能力数据（来自 fundamental_context.growth）
+    growth_block = (
+        fundamental_context.get("growth", {})
+        if isinstance(fundamental_context, dict)
+        else {}
+    )
+    growth_data = (
+        growth_block.get("data", {})
+        if isinstance(growth_block, dict)
+        else {}
+    )
+    if isinstance(growth_data, dict) and growth_data:
+        prompt += f"""
+### 成长能力
+| 指标 | 数值 | 说明 |
+|------|------|------|
+| 营收同比 | {growth_data.get('revenue_yoy', 'N/A')}% | |
+| 净利润同比 | {growth_data.get('net_profit_yoy', 'N/A')}% | |
+| 毛利率 | {growth_data.get('gross_margin', 'N/A')}% | |
+| 净利率 | {growth_data.get('net_margin', 'N/A')}% | |
+"""
+
+    # 添加资金流向数据（来自 fundamental_context.capital_flow）
+    cf_block = (
+        fundamental_context.get("capital_flow", {})
+        if isinstance(fundamental_context, dict)
+        else {}
+    )
+    cf_data = (
+        cf_block.get("data", {})
+        if isinstance(cf_block, dict)
+        else {}
+    )
+    if isinstance(cf_data, dict) and cf_data:
+        stock_flow = cf_data.get("stock_flow", {}) or {}
+        if isinstance(stock_flow, dict) and stock_flow:
+            prompt += f"""
+### 资金流向
+| 指标 | 数值 |
+|------|------|
+| 主力净流入 | {stock_flow.get('main_net_inflow', 'N/A')} 万元 |
+| 超大单净流入 | {stock_flow.get('xl_net_inflow', 'N/A')} 万元 |
+| 大单净流入 | {stock_flow.get('l_net_inflow', 'N/A')} 万元 |
+| 中单净流入 | {stock_flow.get('m_net_inflow', 'N/A')} 万元 |
+| 小单净流入 | {stock_flow.get('s_net_inflow', 'N/A')} 万元 |
+"""
+
+    # 添加数据库中的财报表数据
+    financial_reports = context.get('financial_reports', []) if isinstance(context, dict) else []
+    if financial_reports:
+        prompt += "\n### 季度财务数据（最近4个季度）\n"
+        prompt += "| 报告期 | 营收(亿) | 营收同比 | 归母净利(亿) | 净利同比 | 毛利率 | ROE | EPS |\n"
+        prompt += "|--------|----------|----------|--------------|----------|--------|-----|-----|\n"
+        for r in financial_reports[:4]:
+            rev = r.get('revenue')
+            rev_str = f"{rev/1e8:.2f}" if rev is not None else 'N/A'
+            profit = r.get('net_profit_parent')
+            profit_str = f"{profit/1e8:.2f}" if profit is not None else 'N/A'
+            prompt += (
+                f"| {r.get('report_date', '-')} | {rev_str} | {r.get('revenue_yoy', '-')}% | "
+                f"{profit_str} | {r.get('net_profit_yoy', '-')}% | "
+                f"{r.get('gross_margin', '-')}% | {r.get('roe', '-')}% | {r.get('eps', '-')} |\n"
+            )
+
+    # 添加数据库中的业绩预告
+    forecasts = context.get('earnings_forecasts', []) if isinstance(context, dict) else []
+    if forecasts:
+        prompt += "\n### 最新业绩预告\n"
+        for f in forecasts[:2]:
+            prompt += f"""
+- 公告日期: {f.get('forecast_date', '-')}
+- 预告类型: {f.get('forecast_type', '-')}
+- 预告摘要: {f.get('forecast_abstract', '-')}
+- 净利润变动: {f.get('chg_min', '-')}%～{f.get('chg_max', '-')}%\n"""
+
+    # 添加筹码分布数据（最小阻力视角）
+    if 'chip' in context:
+        chip = context['chip']
+        profit_ratio = chip.get('profit_ratio', 0)
+        concentration_90 = chip.get('concentration_90', 0) or 0
+        avg_cost = chip.get('avg_cost', 0) or 0
+        today_close = today.get('close', 0) or 0
+
+        # 最小阻力方向判断
+        least_resistance = "不明"
+        if concentration_90 < 0.08 and profit_ratio > 0.3:
+            least_resistance = "向上（筹码高度集中+获利适中，阻力极小）"
+        elif concentration_90 > 0.30:
+            least_resistance = "无序（筹码极度分散，多空拉锯）"
+        elif avg_cost > 0 and today_close > avg_cost * 1.15 and concentration_90 > 0.25:
+            least_resistance = "向下（现价远离成本+下方真空，回调无承接）"
+        elif profit_ratio > 0.85 and concentration_90 > 0.20:
+            least_resistance = "向下（获利盘极高且发散，抛压重重）"
+        elif avg_cost > 0 and today_close > avg_cost * 1.05:
+            least_resistance = "向上（股价站上成本区，上方真空）"
+
+        prompt += f"""
+### 筹码阻力地图（最小阻力方向）
+| 指标 | 数值 | 阻力含义 |
+|------|------|----------|
+| **最小阻力方向** | **{least_resistance}** | 核心判断 |
+| **获利比例** | **{profit_ratio:.1%}** | >85%且发散=抛压大；30-70%=健康 |
+| 平均成本 | {avg_cost if avg_cost else 'N/A'} 元 | 现价高于成本=支撑；远离成本=真空 |
+| 90%筹码集中度 | {concentration_90:.2%} | <8%高度集中（变盘）；>30%分散（无序） |
+| 筹码状态 | {chip.get('chip_status', unknown_text)} | |
+
+> **最小阻力法则**：筹码分布回答的是"价格往某个方向运动会遇到多少反向力量"。
+> - 单峰密集+股价站上峰顶 = 上方真空，轻轻一推就上去
+> - 双峰对峙 = 上下各有压力/支撑，价格被夹住
+> - 获利盘极高且筹码发散 = 到处都是解套/获利抛压，突破阻力极大
+"""
+
+    # 添加趋势分析结果
+    if 'trend_analysis' in context:
+        trend = _sanitize_trend_analysis_for_prompt(
+            context['trend_analysis'],
+            volume_change_ratio=context.get('volume_change_ratio'),
+        )
+        consistency_notes = trend.get('prompt_consistency_notes', [])
+        if use_legacy_default_prompt:
+            bias_warning = "🚨 超过5%，严禁追高！" if trend.get('bias_ma5', 0) > 5 else "✅ 安全范围"
+            prompt += f"""
+### 趋势分析预判（基于交易理念）
+| 指标 | 数值 | 判定 |
+|------|------|------|
+| 趋势状态 | {trend.get('trend_status', unknown_text)} | |
+| 均线排列 | {trend.get('ma_alignment', unknown_text)} | MA5>MA10>MA20为多头 |
+| 趋势强度 | {trend.get('trend_strength', 0)}/100 | |
+| **乖离率(MA5)** | **{trend.get('bias_ma5', 0):+.2f}%** | {bias_warning} |
+| 乖离率(MA10) | {trend.get('bias_ma10', 0):+.2f}% | |
+| 量能状态 | {trend.get('volume_status', unknown_text)} | {trend.get('volume_trend', '')} |
+| 系统信号 | {trend.get('buy_signal', unknown_text)} | |
+| 系统评分 | {trend.get('signal_score', 0)}/100 | |
+
+#### 系统分析理由
+**买入理由**：
+{chr(10).join('- ' + r for r in trend.get('signal_reasons', ['无'])) if trend.get('signal_reasons') else '- 无'}
+
+**风险因素**：
+{chr(10).join('- ' + r for r in trend.get('risk_factors', ['无'])) if trend.get('risk_factors') else '- 无'}
+"""
+            if consistency_notes:
+                prompt += f"""
+
+**一致性约束**：
+{chr(10).join('- ' + note for note in consistency_notes)}
+"""
+        else:
+            bias_warning = (
+                "🚨 偏离较大，需谨慎评估追高风险"
+                if trend.get('bias_ma5', 0) > 5
+                else "✅ 位置相对可控"
+            )
+            prompt += f"""
+### 技术与结构分析（供激活技能判断参考）
+| 指标 | 数值 | 说明 |
+|------|------|------|
+| 趋势状态 | {trend.get('trend_status', unknown_text)} | |
+| 均线排列 | {trend.get('ma_alignment', unknown_text)} | 结合激活技能判断结构强弱 |
+| 趋势强度 | {trend.get('trend_strength', 0)}/100 | |
+| **价格位置(MA5)** | **{trend.get('bias_ma5', 0):+.2f}%** | {bias_warning} |
+| 价格位置(MA10) | {trend.get('bias_ma10', 0):+.2f}% | |
+| 量能状态 | {trend.get('volume_status', unknown_text)} | {trend.get('volume_trend', '')} |
+| 系统信号 | {trend.get('buy_signal', unknown_text)} | |
+| 系统评分 | {trend.get('signal_score', 0)}/100 | |
+
+#### 系统分析理由
+**支持因素**：
+{chr(10).join('- ' + r for r in trend.get('signal_reasons', ['无'])) if trend.get('signal_reasons') else '- 无'}
+
+**风险因素**：
+{chr(10).join('- ' + r for r in trend.get('risk_factors', ['无'])) if trend.get('risk_factors') else '- 无'}
+"""
+            if consistency_notes:
+                prompt += f"""
+
+**一致性约束**：
+{chr(10).join('- ' + note for note in consistency_notes)}
+"""
+
+    # 添加昨日对比数据
+    if 'yesterday' in context:
+        volume_change = context.get('volume_change_ratio', 'N/A')
+        prompt += f"""
+### 量价变化
+- 成交量较昨日变化：{volume_change}倍
+- 价格较昨日变化：{context.get('price_change_ratio', 'N/A')}%
+"""
+        parsed_volume_change = _safe_float(volume_change, default=math.nan)
+        if math.isfinite(parsed_volume_change) and parsed_volume_change > 10:
+            prompt += """
+- ⚠️ 量能异常提示：成交量较昨日放大超过10倍，可能受异常数据或一次性冲量影响，必须降权解读，不能机械视为强确认信号
+"""
+
+    # 添加新闻搜索结果（重点区域）
+    if news_window_days is None:
+        news_window_days = 3
+
+    prompt += """
+---
+
+## 📰 舆情情报
+"""
+    if news_context:
+        prompt += f"""
+以下是 **{stock_name}({code})** 近{news_window_days}日的新闻搜索结果，请重点提取：
+1. 🚨 **风险警报**：减持、处罚、利空
+2. 🎯 **利好催化**：业绩、合同、政策
+3. 📊 **业绩预期**：年报预告、业绩快报
+4. 🕒 **时间规则（强制）**：
+   - 输出到 `risk_alerts` / `positive_catalysts` / `latest_news` 的每一条都必须带具体日期（YYYY-MM-DD）
+   - 超出近{news_window_days}日窗口的新闻一律忽略
+   - 时间未知、无法确定发布日期的新闻一律忽略
+
+```
+{news_context}
+```
+"""
+    else:
+        prompt += """
+未搜索到该股票近期的相关新闻。请主要依据技术面数据进行分析。
+"""
+
+    # 注入缺失数据警告
+    if context.get('data_missing'):
+        prompt += """
+⚠️ **数据缺失警告**
+由于接口限制，当前无法获取完整的实时行情和技术指标数据。
+请 **忽略上述表格中的 N/A 数据**，重点依据 **【📰 舆情情报】** 中的新闻进行基本面和情绪面分析。
+在回答技术面问题（如均线、乖离率）时，请直接说明"数据缺失，无法判断"，**严禁编造数据**。
+"""
+
+    return prompt
+
+
 def _derive_chip_health(profit_ratio: float, concentration_90: float, language: str = "zh") -> str:
     """Derive chip_health from profit_ratio and concentration_90."""
     if profit_ratio >= 0.9:
@@ -567,7 +1036,8 @@ def fill_price_position_if_needed(
         dash = result.dashboard
         dp = dash.get("data_perspective") or {}
         dash["data_perspective"] = dp
-        pp = dp.get("price_position") or {}
+        pp = dp.get("price_position")
+        pp = pp if isinstance(pp, dict) else {}
 
         computed: Dict[str, Any] = {}
         if trend_result:
@@ -730,6 +1200,9 @@ class AnalysisResult:
     # ========== 历史对比（Report Engine P0）==========
     query_id: Optional[str] = None  # 本次分析 query_id，用于历史对比时排除本次记录
 
+    # ========== 60分钟精修（第二轮分析）==========
+    minutely_refinement: Optional[Dict[str, Any]] = None  # Agent路径第二轮60分钟精修结果
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
@@ -766,6 +1239,7 @@ class AnalysisResult:
             'current_price': self.current_price,
             'change_pct': self.change_pct,
             'model_used': self.model_used,
+            'minutely_refinement': self.minutely_refinement,
         }
 
     def get_core_conclusion(self) -> str:
@@ -786,7 +1260,9 @@ class AnalysisResult:
     def get_sniper_points(self) -> Dict[str, str]:
         """获取狙击点位"""
         if self.dashboard and 'battle_plan' in self.dashboard:
-            return self.dashboard['battle_plan'].get('sniper_points', {})
+            sp = self.dashboard['battle_plan'].get('sniper_points')
+            if isinstance(sp, dict):
+                return sp
         return {}
 
     def get_checklist(self) -> List[str]:
@@ -836,309 +1312,6 @@ class GeminiAnalyzer:
         analyzer = GeminiAnalyzer()
         result = analyzer.analyze(context, news_context)
     """
-
-    # ========================================
-    # 系统提示词 - 决策仪表盘 v2.0
-    # ========================================
-    # 输出格式升级：从简单信号升级为决策仪表盘
-    # 核心模块：核心结论 + 数据透视 + 舆情情报 + 作战计划
-    # ========================================
-
-    LEGACY_DEFAULT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{market_placeholder}投资分析师，负责生成专业的【决策仪表盘】分析报告。
-
-{guidelines_placeholder}
-
-""" + CORE_TRADING_SKILL_POLICY_ZH + """
-
-## 输出格式：决策仪表盘 JSON
-
-请严格按照以下 JSON 格式输出，这是一个完整的【决策仪表盘】：
-
-```json
-{
-    "stock_name": "股票中文名称",
-    "sentiment_score": 0-100整数,
-    "trend_prediction": "强烈看多/看多/震荡/看空/强烈看空",
-    "operation_advice": "买入/加仓/持有/减仓/卖出/观望",
-    "decision_type": "buy/hold/sell",
-    "confidence_level": "高/中/低",
-
-    "dashboard": {
-        "core_conclusion": {
-            "one_sentence": "一句话核心结论（30字以内，直接告诉用户做什么）",
-            "signal_type": "🟢买入信号/🟡持有观望/🔴卖出信号/⚠️风险警告",
-            "time_sensitivity": "立即行动/今日内/本周内/不急",
-            "position_advice": {
-                "no_position": "空仓者建议：具体操作指引",
-                "has_position": "持仓者建议：具体操作指引"
-            }
-        },
-
-        "data_perspective": {
-            "trend_status": {
-                "ma_alignment": "均线排列状态描述",
-                "is_bullish": true/false,
-                "trend_score": 0-100
-            },
-            "price_position": {
-                "current_price": 当前价格数值,
-                "ma5": MA5数值,
-                "ma10": MA10数值,
-                "ma20": MA20数值,
-                "bias_ma5": 乖离率百分比数值,
-                "bias_status": "安全/警戒/危险",
-                "support_level": 支撑位价格,
-                "resistance_level": 压力位价格
-            },
-            "volume_analysis": {
-                "volume_ratio": 量比数值,
-                "volume_status": "放量/缩量/平量",
-                "turnover_rate": 换手率百分比,
-                "volume_meaning": "量能含义解读（如：缩量回调表示抛压减轻）"
-            },
-            "chip_structure": {
-                "profit_ratio": 获利比例,
-                "avg_cost": 平均成本,
-                "concentration": 筹码集中度,
-                "chip_health": "健康/一般/警惕"
-            }
-        },
-
-        "intelligence": {
-            "latest_news": "【最新消息】近期重要新闻摘要",
-            "risk_alerts": ["风险点1：具体描述", "风险点2：具体描述"],
-            "positive_catalysts": ["利好1：具体描述", "利好2：具体描述"],
-            "earnings_outlook": "业绩预期分析（基于年报预告、业绩快报等）",
-            "sentiment_summary": "舆情情绪一句话总结"
-        },
-
-        "battle_plan": {
-            "sniper_points": {
-                "ideal_buy": "理想买入点：XX元（在MA5附近）",
-                "secondary_buy": "次优买入点：XX元（在MA10附近）",
-                "stop_loss": "止损位：XX元（跌破MA20或X%）",
-                "take_profit": "目标位：XX元（前高/整数关口）"
-            },
-            "position_strategy": {
-                "suggested_position": "建议仓位：X成",
-                "entry_plan": "分批建仓策略描述",
-                "risk_control": "风控策略描述"
-            },
-            "action_checklist": [
-                "✅/⚠️/❌ 检查项1：多头排列",
-                "✅/⚠️/❌ 检查项2：乖离率合理（强势趋势可放宽）",
-                "✅/⚠️/❌ 检查项3：量能配合",
-                "✅/⚠️/❌ 检查项4：无重大利空",
-                "✅/⚠️/❌ 检查项5：筹码健康",
-                "✅/⚠️/❌ 检查项6：PE估值合理"
-            ]
-        }
-    },
-
-    "analysis_summary": "100字综合分析摘要",
-    "key_points": "3-5个核心看点，逗号分隔",
-    "risk_warning": "风险提示",
-    "buy_reason": "操作理由，引用交易理念",
-
-    "trend_analysis": "走势形态分析",
-    "short_term_outlook": "短期1-3日展望",
-    "medium_term_outlook": "中期1-2周展望",
-    "technical_analysis": "技术面综合分析",
-    "ma_analysis": "均线系统分析",
-    "volume_analysis": "量能分析",
-    "pattern_analysis": "K线形态分析",
-    "fundamental_analysis": "基本面分析",
-    "sector_position": "板块行业分析",
-    "company_highlights": "公司亮点/风险",
-    "news_summary": "新闻摘要",
-    "market_sentiment": "市场情绪",
-    "hot_topics": "相关热点",
-
-    "search_performed": true/false,
-    "data_sources": "数据来源说明"
-}
-```
-
-## 评分标准
-
-### 强烈买入（80-100分）：
-- ✅ 多头排列：MA5 > MA10 > MA20
-- ✅ 低乖离率：<2%，最佳买点
-- ✅ 缩量回调或放量突破
-- ✅ 筹码集中健康
-- ✅ 消息面有利好催化
-
-### 买入（60-79分）：
-- ✅ 多头排列或弱势多头
-- ✅ 乖离率 <5%
-- ✅ 量能正常
-- ⚪ 允许一项次要条件不满足
-
-### 观望（40-59分）：
-- ⚠️ 乖离率 >5%（追高风险）
-- ⚠️ 均线缠绕趋势不明
-- ⚠️ 有风险事件
-
-### 卖出/减仓（0-39分）：
-- ❌ 空头排列
-- ❌ 跌破MA20
-- ❌ 放量下跌
-- ❌ 重大利空
-
-## 决策仪表盘核心原则
-
-1. **核心结论先行**：一句话说清该买该卖
-2. **分持仓建议**：空仓者和持仓者给不同建议
-3. **精确狙击点**：必须给出具体价格，不说模糊的话
-4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
-5. **风险优先级**：舆情中的风险点要醒目标出"""
-
-    SYSTEM_PROMPT = """你是一位{market_placeholder}投资分析师，负责生成专业的【决策仪表盘】分析报告。
-
-{guidelines_placeholder}
-
-{default_skill_policy_section}
-{skills_section}
-
-## 输出格式：决策仪表盘 JSON
-
-请严格按照以下 JSON 格式输出，这是一个完整的【决策仪表盘】：
-
-```json
-{
-    "stock_name": "股票中文名称",
-    "sentiment_score": 0-100整数,
-    "trend_prediction": "强烈看多/看多/震荡/看空/强烈看空",
-    "operation_advice": "买入/加仓/持有/减仓/卖出/观望",
-    "decision_type": "buy/hold/sell",
-    "confidence_level": "高/中/低",
-
-    "dashboard": {
-        "core_conclusion": {
-            "one_sentence": "一句话核心结论（30字以内，直接告诉用户做什么）",
-            "signal_type": "🟢买入信号/🟡持有观望/🔴卖出信号/⚠️风险警告",
-            "time_sensitivity": "立即行动/今日内/本周内/不急",
-            "position_advice": {
-                "no_position": "空仓者建议：具体操作指引",
-                "has_position": "持仓者建议：具体操作指引"
-            }
-        },
-
-        "data_perspective": {
-            "trend_status": {
-                "ma_alignment": "均线排列状态描述",
-                "is_bullish": true/false,
-                "trend_score": 0-100
-            },
-            "price_position": {
-                "current_price": 当前价格数值,
-                "ma5": MA5数值,
-                "ma10": MA10数值,
-                "ma20": MA20数值,
-                "bias_ma5": 乖离率百分比数值,
-                "bias_status": "安全/警戒/危险",
-                "support_level": 支撑位价格,
-                "resistance_level": 压力位价格
-            },
-            "volume_analysis": {
-                "volume_ratio": 量比数值,
-                "volume_status": "放量/缩量/平量",
-                "turnover_rate": 换手率百分比,
-                "volume_meaning": "量能含义解读（如：缩量回调表示抛压减轻）"
-            },
-            "chip_structure": {
-                "profit_ratio": 获利比例,
-                "avg_cost": 平均成本,
-                "concentration": 筹码集中度,
-                "chip_health": "健康/一般/警惕"
-            }
-        },
-
-        "intelligence": {
-            "latest_news": "【最新消息】近期重要新闻摘要",
-            "risk_alerts": ["风险点1：具体描述", "风险点2：具体描述"],
-            "positive_catalysts": ["利好1：具体描述", "利好2：具体描述"],
-            "earnings_outlook": "业绩预期分析（基于年报预告、业绩快报等）",
-            "sentiment_summary": "舆情情绪一句话总结"
-        },
-
-        "battle_plan": {
-            "sniper_points": {
-                "ideal_buy": "理想入场位：XX元（满足主要技能触发条件）",
-                "secondary_buy": "次优入场位：XX元（更保守或确认后执行）",
-                "stop_loss": "止损位：XX元（失效条件或X%风险）",
-                "take_profit": "目标位：XX元（按阻力位/风险回报比制定）"
-            },
-            "position_strategy": {
-                "suggested_position": "建议仓位：X成",
-                "entry_plan": "分批建仓策略描述",
-                "risk_control": "风控策略描述"
-            },
-            "action_checklist": [
-                "✅/⚠️/❌ 检查项1：当前结构是否满足激活技能条件",
-                "✅/⚠️/❌ 检查项2：入场位置与风险回报是否合理",
-                "✅/⚠️/❌ 检查项3：量价/波动/筹码是否支持判断",
-                "✅/⚠️/❌ 检查项4：无重大利空",
-                "✅/⚠️/❌ 检查项5：仓位与止损计划明确",
-                "✅/⚠️/❌ 检查项6：估值/业绩/催化与结论匹配"
-            ]
-        }
-    },
-
-    "analysis_summary": "100字综合分析摘要",
-    "key_points": "3-5个核心看点，逗号分隔",
-    "risk_warning": "风险提示",
-    "buy_reason": "操作理由，引用激活技能或风险框架",
-
-    "trend_analysis": "走势形态分析",
-    "short_term_outlook": "短期1-3日展望",
-    "medium_term_outlook": "中期1-2周展望",
-    "technical_analysis": "技术面综合分析",
-    "ma_analysis": "均线系统分析",
-    "volume_analysis": "量能分析",
-    "pattern_analysis": "K线形态分析",
-    "fundamental_analysis": "基本面分析",
-    "sector_position": "板块行业分析",
-    "company_highlights": "公司亮点/风险",
-    "news_summary": "新闻摘要",
-    "market_sentiment": "市场情绪",
-    "hot_topics": "相关热点",
-
-    "search_performed": true/false,
-    "data_sources": "数据来源说明"
-}
-```
-
-## 评分标准
-
-### 强烈买入（80-100分）：
-- ✅ 多个激活技能同时支持积极结论
-- ✅ 上行空间、触发条件与风险回报清晰
-- ✅ 关键风险已排查，仓位与止损计划明确
-- ✅ 重要数据和情报结论彼此一致
-
-### 买入（60-79分）：
-- ✅ 主信号偏积极，但仍有少量待确认项
-- ✅ 允许存在可控风险或次优入场点
-- ✅ 需要在报告中明确补充观察条件
-
-### 观望（40-59分）：
-- ⚠️ 信号分歧较大，或缺乏足够确认
-- ⚠️ 风险与机会大致均衡
-- ⚠️ 更适合等待触发条件或回避不确定性
-
-### 卖出/减仓（0-39分）：
-- ❌ 主要结论转弱，风险明显高于收益
-- ❌ 触发了止损/失效条件或重大利空
-- ❌ 现有仓位更需要保护而不是进攻
-
-## 决策仪表盘核心原则
-
-1. **核心结论先行**：一句话说清该买该卖
-2. **分持仓建议**：空仓者和持仓者给不同建议
-3. **精确狙击点**：必须给出具体价格，不说模糊的话
-4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
-5. **风险优先级**：舆情中的风险点要醒目标出"""
 
     TEXT_SYSTEM_PROMPT = """你是一位专业的股票分析助手。
 
@@ -1217,49 +1390,19 @@ class GeminiAnalyzer:
         )
 
     def _get_analysis_system_prompt(self, report_language: str, stock_code: str = "") -> str:
-        """Build the analyzer system prompt with output-language guidance."""
+        """Build the analyzer system prompt via Jinja2 template rendering."""
+        from src.prompt_builder import build_system_prompt
+
         lang = normalize_report_language(report_language)
-        market_role = get_market_role(stock_code, lang)
-        market_guidelines = get_market_guidelines(stock_code, lang)
-        skill_instructions, default_skill_policy, use_legacy_default_prompt = self._get_skill_prompt_sections()
-        if use_legacy_default_prompt:
-            base_prompt = self.LEGACY_DEFAULT_SYSTEM_PROMPT.replace(
-                "{market_placeholder}", market_role
-            ).replace(
-                "{guidelines_placeholder}", market_guidelines
-            )
-        else:
-            skills_section = ""
-            if skill_instructions:
-                skills_section = f"## 激活的交易技能\n\n{skill_instructions}\n"
-            default_skill_policy_section = ""
-            if default_skill_policy:
-                default_skill_policy_section = f"{default_skill_policy}\n"
-            base_prompt = (
-                self.SYSTEM_PROMPT.replace("{market_placeholder}", market_role)
-                .replace("{guidelines_placeholder}", market_guidelines)
-                .replace("{default_skill_policy_section}", default_skill_policy_section)
-                .replace("{skills_section}", skills_section)
-            )
-        if lang == "en":
-            return base_prompt + """
-
-## Output Language (highest priority)
-
-- Keep all JSON keys unchanged.
-- `decision_type` must remain `buy|hold|sell`.
-- All human-readable JSON values must be written in English.
-- Use the common English company name when you are confident; otherwise keep the original listed company name instead of inventing one.
-- This includes `stock_name`, `trend_prediction`, `operation_advice`, `confidence_level`, nested dashboard text, checklist items, and all narrative summaries.
-"""
-        return base_prompt + """
-
-## 输出语言（最高优先级）
-
-- 所有 JSON 键名保持不变。
-- `decision_type` 必须保持为 `buy|hold|sell`。
-- 所有面向用户的人类可读文本值必须使用中文。
-"""
+        skill_instructions, default_skill_policy, use_legacy = self._get_skill_prompt_sections()
+        return build_system_prompt(
+            market_role=get_market_role(stock_code, lang),
+            market_guidelines=get_market_guidelines(stock_code, lang),
+            report_language=lang,
+            skill_instructions=skill_instructions,
+            default_skill_policy=default_skill_policy,
+            use_legacy_default_prompt=use_legacy,
+        )
 
     def _has_channel_config(self, config: Config) -> bool:
         """Check if multi-channel config (channels / YAML / legacy model_list) is active."""
@@ -1462,7 +1605,7 @@ class GeminiAnalyzer:
         system_prompt: Optional[str] = None,
         stream: bool = False,
         stream_progress_callback: Optional[Callable[[int], None]] = None,
-        response_validator: Optional[Callable[[str], None]] = None,
+        timeout: Optional[float] = None,
     ) -> Tuple[str, str, Dict[str, Any]]:
         """Call LLM via litellm with fallback across configured models.
 
@@ -1523,6 +1666,8 @@ class GeminiAnalyzer:
                 }
                 if extra:
                     call_kwargs["extra_body"] = extra
+                if timeout is not None:
+                    call_kwargs["timeout"] = timeout
 
                 _stream_text: Optional[str] = None
                 _stream_usage: Dict[str, Any] = {}
@@ -1737,27 +1882,14 @@ class GeminiAnalyzer:
 
             while True:
                 start_time = time.time()
-                try:
-                    response_text, model_used, llm_usage = self._call_litellm(
-                        current_prompt,
-                        generation_config,
-                        system_prompt=system_prompt,
-                        stream=True,
-                        stream_progress_callback=stream_progress_callback,
-                        response_validator=self._validate_json_response,
-                    )
-                except _AllModelsFailedError as exc:
-                    if exc.last_response_text is not None:
-                        logger.warning(
-                            "[LLM JSON] %s(%s): all models returned invalid JSON, using text fallback",
-                            name,
-                            code,
-                        )
-                        response_text = exc.last_response_text
-                        model_used = exc.last_model
-                        llm_usage = exc.last_usage
-                    else:
-                        raise
+                response_text, model_used, llm_usage = self._call_litellm(
+                    current_prompt,
+                    generation_config,
+                    system_prompt=system_prompt,
+                    stream=True,
+                    stream_progress_callback=stream_progress_callback,
+                    timeout=180,
+                )
                 elapsed = time.time() - start_time
 
                 # 记录响应信息
@@ -1856,210 +1988,13 @@ class GeminiAnalyzer:
         code = context.get('code', 'Unknown')
         report_language = normalize_report_language(report_language)
         _, _, use_legacy_default_prompt = self._get_skill_prompt_sections()
-        
+
         # 优先使用上下文中的股票名称（从 realtime_quote 获取）
         stock_name = context.get('stock_name', name)
         if not stock_name or stock_name == f'股票{code}':
             stock_name = STOCK_NAME_MAP.get(code, f'股票{code}')
-            
-        today = context.get('today', {})
-        unknown_text = get_unknown_text(report_language)
-        no_data_text = get_no_data_text(report_language)
-        
-        # ========== 构建决策仪表盘格式的输入 ==========
-        prompt = f"""# 决策仪表盘分析请求
 
-## 📊 股票基础信息
-| 项目 | 数据 |
-|------|------|
-| 股票代码 | **{code}** |
-| 股票名称 | **{stock_name}** |
-| 分析日期 | {context.get('date', unknown_text)} |
-
----
-
-## 📈 技术面数据
-
-### 今日行情
-| 指标 | 数值 |
-|------|------|
-| 收盘价 | {today.get('close', 'N/A')} 元 |
-| 开盘价 | {today.get('open', 'N/A')} 元 |
-| 最高价 | {today.get('high', 'N/A')} 元 |
-| 最低价 | {today.get('low', 'N/A')} 元 |
-| 涨跌幅 | {today.get('pct_chg', 'N/A')}% |
-| 成交量 | {self._format_volume(today.get('volume'))} |
-| 成交额 | {self._format_amount(today.get('amount'))} |
-
-### 均线系统（关键判断指标）
-| 均线 | 数值 | 说明 |
-|------|------|------|
-| MA5 | {today.get('ma5', 'N/A')} | 短期趋势线 |
-| MA10 | {today.get('ma10', 'N/A')} | 中短期趋势线 |
-| MA20 | {today.get('ma20', 'N/A')} | 中期趋势线 |
-| 均线形态 | {context.get('ma_status', unknown_text)} | 多头/空头/缠绕 |
-"""
-        
-        # 添加实时行情数据（量比、换手率等）
-        if 'realtime' in context:
-            rt = context['realtime']
-            prompt += f"""
-### 实时行情增强数据
-| 指标 | 数值 | 解读 |
-|------|------|------|
-| 当前价格 | {rt.get('price', 'N/A')} 元 | |
-| **量比** | **{rt.get('volume_ratio', 'N/A')}** | {rt.get('volume_ratio_desc', '')} |
-| **换手率** | **{rt.get('turnover_rate', 'N/A')}%** | |
-| 市盈率(动态) | {rt.get('pe_ratio', 'N/A')} | |
-| 市净率 | {rt.get('pb_ratio', 'N/A')} | |
-| 总市值 | {self._format_amount(rt.get('total_mv'))} | |
-| 流通市值 | {self._format_amount(rt.get('circ_mv'))} | |
-| 60日涨跌幅 | {rt.get('change_60d', 'N/A')}% | 中期表现 |
-"""
-
-        # 添加财报与分红（价值投资口径）
-        fundamental_context = context.get("fundamental_context") if isinstance(context, dict) else None
-        earnings_block = (
-            fundamental_context.get("earnings", {})
-            if isinstance(fundamental_context, dict)
-            else {}
-        )
-        earnings_data = (
-            earnings_block.get("data", {})
-            if isinstance(earnings_block, dict)
-            else {}
-        )
-        financial_report = (
-            earnings_data.get("financial_report", {})
-            if isinstance(earnings_data, dict)
-            else {}
-        )
-        dividend_metrics = (
-            earnings_data.get("dividend", {})
-            if isinstance(earnings_data, dict)
-            else {}
-        )
-        if isinstance(financial_report, dict) or isinstance(dividend_metrics, dict):
-            financial_report = financial_report if isinstance(financial_report, dict) else {}
-            dividend_metrics = dividend_metrics if isinstance(dividend_metrics, dict) else {}
-            ttm_yield = dividend_metrics.get("ttm_dividend_yield_pct", "N/A")
-            ttm_cash = dividend_metrics.get("ttm_cash_dividend_per_share", "N/A")
-            ttm_count = dividend_metrics.get("ttm_event_count", "N/A")
-            report_date = financial_report.get("report_date", "N/A")
-            prompt += f"""
-### 财报与分红（价值投资口径）
-| 指标 | 数值 | 说明 |
-|------|------|------|
-| 最近报告期 | {report_date} | 来自结构化财报字段 |
-| 营业收入 | {financial_report.get('revenue', 'N/A')} | |
-| 归母净利润 | {financial_report.get('net_profit_parent', 'N/A')} | |
-| 经营现金流 | {financial_report.get('operating_cash_flow', 'N/A')} | |
-| ROE | {financial_report.get('roe', 'N/A')} | |
-| 近12个月每股现金分红 | {ttm_cash} | 仅现金分红、税前口径 |
-| TTM 股息率 | {ttm_yield} | 公式：近12个月每股现金分红 / 当前价格 × 100% |
-| TTM 分红事件数 | {ttm_count} | |
-
-> 若上述字段为 N/A 或缺失，请明确写“数据缺失，无法判断”，禁止编造。
-"""
-
-        # 添加筹码分布数据
-        if 'chip' in context:
-            chip = context['chip']
-            profit_ratio = chip.get('profit_ratio', 0)
-            prompt += f"""
-### 筹码分布数据（效率指标）
-| 指标 | 数值 | 健康标准 |
-|------|------|----------|
-| **获利比例** | **{profit_ratio:.1%}** | 70-90%时警惕 |
-| 平均成本 | {chip.get('avg_cost', 'N/A')} 元 | 现价应高于5-15% |
-| 90%筹码集中度 | {chip.get('concentration_90', 0):.2%} | <15%为集中 |
-| 70%筹码集中度 | {chip.get('concentration_70', 0):.2%} | |
-| 筹码状态 | {chip.get('chip_status', unknown_text)} | |
-"""
-        
-        # 添加趋势分析结果（仅隐式内建 bull_trend 默认回退保留旧口径）
-        if 'trend_analysis' in context:
-            trend = _sanitize_trend_analysis_for_prompt(
-                context['trend_analysis'],
-                volume_change_ratio=context.get('volume_change_ratio'),
-            )
-            consistency_notes = trend.get('prompt_consistency_notes', [])
-            if use_legacy_default_prompt:
-                bias_warning = "🚨 超过5%，严禁追高！" if trend.get('bias_ma5', 0) > 5 else "✅ 安全范围"
-                prompt += f"""
-### 趋势分析预判（基于交易理念）
-| 指标 | 数值 | 判定 |
-|------|------|------|
-| 趋势状态 | {trend.get('trend_status', unknown_text)} | |
-| 均线排列 | {trend.get('ma_alignment', unknown_text)} | MA5>MA10>MA20为多头 |
-| 趋势强度 | {trend.get('trend_strength', 0)}/100 | |
-| **乖离率(MA5)** | **{trend.get('bias_ma5', 0):+.2f}%** | {bias_warning} |
-| 乖离率(MA10) | {trend.get('bias_ma10', 0):+.2f}% | |
-| 量能状态 | {trend.get('volume_status', unknown_text)} | {trend.get('volume_trend', '')} |
-| 系统信号 | {trend.get('buy_signal', unknown_text)} | |
-| 系统评分 | {trend.get('signal_score', 0)}/100 | |
-
-#### 系统分析理由
-**买入理由**：
-{chr(10).join('- ' + r for r in trend.get('signal_reasons', ['无'])) if trend.get('signal_reasons') else '- 无'}
-
-**风险因素**：
-{chr(10).join('- ' + r for r in trend.get('risk_factors', ['无'])) if trend.get('risk_factors') else '- 无'}
-"""
-                if consistency_notes:
-                    prompt += f"""
-
-**一致性约束**：
-{chr(10).join('- ' + note for note in consistency_notes)}
-"""
-            else:
-                bias_warning = (
-                    "🚨 偏离较大，需谨慎评估追高风险"
-                    if trend.get('bias_ma5', 0) > 5
-                    else "✅ 位置相对可控"
-                )
-                prompt += f"""
-### 技术与结构分析（供激活技能判断参考）
-| 指标 | 数值 | 说明 |
-|------|------|------|
-| 趋势状态 | {trend.get('trend_status', unknown_text)} | |
-| 均线排列 | {trend.get('ma_alignment', unknown_text)} | 结合激活技能判断结构强弱 |
-| 趋势强度 | {trend.get('trend_strength', 0)}/100 | |
-| **价格位置(MA5)** | **{trend.get('bias_ma5', 0):+.2f}%** | {bias_warning} |
-| 价格位置(MA10) | {trend.get('bias_ma10', 0):+.2f}% | |
-| 量能状态 | {trend.get('volume_status', unknown_text)} | {trend.get('volume_trend', '')} |
-| 系统信号 | {trend.get('buy_signal', unknown_text)} | |
-| 系统评分 | {trend.get('signal_score', 0)}/100 | |
-
-#### 系统分析理由
-**支持因素**：
-{chr(10).join('- ' + r for r in trend.get('signal_reasons', ['无'])) if trend.get('signal_reasons') else '- 无'}
-
-**风险因素**：
-{chr(10).join('- ' + r for r in trend.get('risk_factors', ['无'])) if trend.get('risk_factors') else '- 无'}
-"""
-                if consistency_notes:
-                    prompt += f"""
-
-**一致性约束**：
-{chr(10).join('- ' + note for note in consistency_notes)}
-"""
-        
-        # 添加昨日对比数据
-        if 'yesterday' in context:
-            volume_change = context.get('volume_change_ratio', 'N/A')
-            prompt += f"""
-### 量价变化
-- 成交量较昨日变化：{volume_change}倍
-- 价格较昨日变化：{context.get('price_change_ratio', 'N/A')}%
-"""
-            parsed_volume_change = _safe_float(volume_change, default=math.nan)
-            if math.isfinite(parsed_volume_change) and parsed_volume_change > 10:
-                prompt += """
-- ⚠️ 量能异常提示：成交量较昨日放大超过10倍，可能受异常数据或一次性冲量影响，必须降权解读，不能机械视为强确认信号
-"""
-        
-        # 添加新闻搜索结果（重点区域）
+        # 解析新闻窗口天数
         news_window_days: Optional[int] = None
         context_window = context.get("news_window_days")
         try:
@@ -2076,41 +2011,20 @@ class GeminiAnalyzer:
                 news_max_age_days=getattr(prompt_config, "news_max_age_days", 3),
                 news_strategy_profile=getattr(prompt_config, "news_strategy_profile", "short"),
             )
-        prompt += """
----
 
-## 📰 舆情情报
-"""
-        if news_context:
-            prompt += f"""
-以下是 **{stock_name}({code})** 近{news_window_days}日的新闻搜索结果，请重点提取：
-1. 🚨 **风险警报**：减持、处罚、利空
-2. 🎯 **利好催化**：业绩、合同、政策
-3. 📊 **业绩预期**：年报预告、业绩快报
-4. 🕒 **时间规则（强制）**：
-   - 输出到 `risk_alerts` / `positive_catalysts` / `latest_news` 的每一条都必须带具体日期（YYYY-MM-DD）
-   - 超出近{news_window_days}日窗口的新闻一律忽略
-   - 时间未知、无法确定发布日期的新闻一律忽略
+        # 调用模块级函数生成数据部分
+        prompt = format_analysis_prompt(
+            context=context,
+            stock_name=stock_name,
+            news_context=news_context,
+            report_language=report_language,
+            news_window_days=news_window_days,
+            use_legacy_default_prompt=use_legacy_default_prompt,
+        )
 
-```
-{news_context}
-```
-"""
-        else:
-            prompt += """
-未搜索到该股票近期的相关新闻。请主要依据技术面数据进行分析。
-"""
+        no_data_text = get_no_data_text(report_language)
 
-        # 注入缺失数据警告
-        if context.get('data_missing'):
-            prompt += """
-⚠️ **数据缺失警告**
-由于接口限制，当前无法获取完整的实时行情和技术指标数据。
-请 **忽略上述表格中的 N/A 数据**，重点依据 **【📰 舆情情报】** 中的新闻进行基本面和情绪面分析。
-在回答技术面问题（如均线、乖离率）时，请直接说明“数据缺失，无法判断”，**严禁编造数据**。
-"""
-
-        # 明确的输出要求
+        # 明确的输出要求（Analyzer 路径专属，Agent 路径由 system prompt 负责）
         prompt += f"""
 ---
 
@@ -2162,7 +2076,7 @@ class GeminiAnalyzer:
 - **检查清单**：每项用 ✅/⚠️/❌ 标记
 - **消息面时间合规**：`latest_news`、`risk_alerts`、`positive_catalysts` 不得包含超出近{news_window_days}日或时间未知的信息
 - **技术面一致性**：严禁把“空头排列”和“多头排列”等互斥结论同时当作有效依据；若基本面/事件面与技术面冲突，必须明确写“事件先行、技术待确认”或“基本面偏多，但技术面尚未确认”
- 
+
 请输出完整的 JSON 格式决策仪表盘。"""
 
         if report_language == "en":
@@ -2185,9 +2099,8 @@ class GeminiAnalyzer:
 - 所有面向用户的人类可读文本值必须使用中文。
 - 当数据缺失时，请使用中文直接说明“{no_data_text}，无法判断”。
 """
-        
+
         return prompt
-    
     def _format_volume(self, volume: Optional[float]) -> str:
         """格式化成交量显示"""
         if volume is None:

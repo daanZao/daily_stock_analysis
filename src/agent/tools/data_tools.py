@@ -269,13 +269,13 @@ def _handle_get_realtime_quote(stock_code: str) -> dict:
 
 get_realtime_quote_tool = ToolDefinition(
     name="get_realtime_quote",
-    description="Get real-time stock quote including price, change%, volume ratio, "
-                "turnover rate, PE, PB, market cap. Returns live market data.",
+    description="获取股票的实时行情，包括价格、涨跌幅、量比、"
+                "换手率、市盈率、市净率、总市值。返回实时市场数据。",
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="Stock code, e.g., '600519' (A-share), 'AAPL' (US), 'hk00700' (HK)",
+            description="股票代码，例如 '600519'（A股）、'AAPL'（美股）、'hk00700'（港股）",
         ),
     ],
     handler=_handle_get_realtime_quote,
@@ -343,18 +343,18 @@ def _handle_get_daily_history(stock_code: str, days: int = 60) -> dict:
 
 get_daily_history_tool = ToolDefinition(
     name="get_daily_history",
-    description="Get daily OHLCV (open, high, low, close, volume) historical data "
-                "with MA5/MA10/MA20 indicators. Returns the last N trading days.",
+    description="获取股票的日 K 线历史数据（开盘价、最高价、最低价、收盘价、成交量），"
+                "包含 MA5/MA10/MA20 指标。返回最近 N 个交易日。",
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="Stock code, e.g., '600519' (A-share), 'AAPL' (US)",
+            description="股票代码，例如 '600519'（A股）、'AAPL'（美股）",
         ),
         ToolParameter(
             name="days",
             type="integer",
-            description="Number of trading days to fetch (default: 60)",
+            description="获取的交易天数（默认：60）",
             required=False,
             default=60,
         ),
@@ -393,14 +393,14 @@ def _handle_get_chip_distribution(stock_code: str) -> dict:
 
 get_chip_distribution_tool = ToolDefinition(
     name="get_chip_distribution",
-    description="Get chip distribution analysis for a stock. Returns profit ratio, "
-                "average cost, chip concentration at 90% and 70% levels. "
-                "Useful for judging support/resistance and holding structure.",
+    description="获取股票的筹码分布分析。返回获利盘比例、"
+                "平均成本、90% 和 70% 筹码集中度。"
+                "用于判断支撑/阻力位和持仓结构。",
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="A-share stock code, e.g., '600519'",
+            description="A股股票代码，例如 '600519'",
         ),
     ],
     handler=_handle_get_chip_distribution,
@@ -434,14 +434,14 @@ def _handle_get_analysis_context(stock_code: str) -> dict:
 
 get_analysis_context_tool = ToolDefinition(
     name="get_analysis_context",
-    description="Get historical analysis context from the database for a stock. "
-                "Returns today's and yesterday's OHLCV data, MA alignment status, "
-                "volume and price changes. Provides the technical data foundation.",
+    description="从数据库获取股票的历史分析上下文。"
+                "返回今日和昨日的 OHLCV 数据、均线排列状态、"
+                "成交量和价格变化。提供技术分析数据基础。",
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="Stock code, e.g., '600519'",
+            description="股票代码，例如 '600519'",
         ),
     ],
     handler=_handle_get_analysis_context,
@@ -491,14 +491,14 @@ def _handle_get_stock_info(stock_code: str) -> dict:
 
 get_stock_info_tool = ToolDefinition(
     name="get_stock_info",
-    description="Get stock fundamental information: valuation, growth, earnings, institution flow, "
-                "stock sector membership (belong_boards; boards is compatibility alias) and "
-                "sector rankings. Returns a compact fundamental_context to reduce token usage.",
+    description="获取股票的基本面信息：估值、成长性、盈利、机构资金流向、"
+                "所属板块（belong_boards；boards 为兼容别名）及"
+                "板块排名。返回精简的 fundamental_context 以减少 token 占用。",
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="A-share stock code, e.g., '600519'",
+            description="A股股票代码，例如 '600519'",
         ),
     ],
     handler=_handle_get_stock_info,
@@ -567,21 +567,21 @@ def _handle_get_portfolio_snapshot(
 
 get_portfolio_snapshot_tool = ToolDefinition(
     name="get_portfolio_snapshot",
-    description="Get portfolio snapshot summary and optional risk blocks. "
-                "Default returns compact summary for lower token usage; "
-                "set include_positions=true to include full position details.",
+    description="获取投资组合快照摘要及可选的风险板块。"
+                "默认返回精简摘要以减少 token 占用；"
+                "设置 include_positions=true 可包含完整持仓详情。",
     parameters=[
         ToolParameter(
             name="account_id",
             type="integer",
-            description="Optional account id; omit to use all active accounts.",
+            description="可选账户 ID；省略则使用所有活跃账户。",
             required=False,
             default=None,
         ),
         ToolParameter(
             name="cost_method",
             type="string",
-            description="Cost method: fifo or avg (default: fifo).",
+            description="成本计算方法：fifo 或 avg（默认：fifo）。",
             required=False,
             default="fifo",
             enum=["fifo", "avg"],
@@ -589,7 +589,7 @@ get_portfolio_snapshot_tool = ToolDefinition(
         ToolParameter(
             name="include_positions",
             type="boolean",
-            description="Whether to include full positions in snapshot output (default: false).",
+            description="是否在快照输出中包含完整持仓（默认：false）。",
             required=False,
             default=False,
         ),
@@ -674,16 +674,16 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
 get_capital_flow_tool = ToolDefinition(
     name="get_capital_flow",
     description=(
-        "Get main-force (主力) capital flow data for an A-share stock. "
-        "Returns today's net inflow, 5-day and 10-day cumulative inflows, "
-        "and top sector-level capital flow rankings. "
-        "Only supported for A-share individual stocks (not ETFs, indices, HK, or US stocks)."
+        "获取 A 股个股的主力资金流向数据。"
+        "返回今日净流入、5 日和 10 日累计净流入，"
+        "以及行业资金流向排名。"
+        "仅支持 A 股个股（不支持 ETF、指数、港股、美股）。"
     ),
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="A-share stock code, e.g., '600519'",
+            description="A股股票代码，例如 '600519'",
         ),
     ],
     handler=_handle_get_capital_flow,
@@ -692,3 +692,271 @@ get_capital_flow_tool = ToolDefinition(
 
 
 ALL_DATA_TOOLS.append(get_capital_flow_tool)
+
+
+# ============================================================
+# get_minutely_history — 60-minute K-line data
+# ============================================================
+
+def _handle_get_minutely_history(stock_code: str, days: int = 5) -> dict:
+    """Get recent 60-minute K-line data from DB or fallback to fetcher."""
+    db = _get_db()
+    records = db.get_minutely_data(stock_code, days=days)
+
+    if not records:
+        manager = _get_fetcher_manager()
+        try:
+            df, source = manager.get_minutely_data(stock_code, days=days)
+            if df is not None and not df.empty:
+                records = df.to_dict(orient="records")
+                for r in records:
+                    if "date" in r:
+                        r["date"] = str(r["date"])
+        except Exception as exc:
+            logger.warning("get_minutely_history fallback fetch failed for %s: %s", stock_code, exc)
+
+    if not records:
+        return {
+            "stock_code": stock_code,
+            "status": "no_data",
+            "note": "No 60-minute data available. This is normal if the stock has no recent minutely records.",
+            "records": [],
+        }
+
+    # Keep only recent N trading days (calendar-day approximation)
+    from datetime import date as _date, timedelta
+    cutoff = _date.today() - timedelta(days=days + 2)
+    filtered = [r for r in records if _date.fromisoformat(str(r.get("date", "1970-01-01"))) >= cutoff]
+
+    return {
+        "stock_code": stock_code,
+        "status": "ok",
+        "period_days": days,
+        "record_count": len(filtered),
+        "records": filtered,
+    }
+
+
+get_minutely_history_tool = ToolDefinition(
+    name="get_minutely_history",
+    description="获取股票的近期 60 分钟 K 线数据（OHLCV）。"
+                "用于日内趋势分析、短期支撑/阻力位判断，"
+                "以及短周期 VCP 形态确认。"
+                "返回最近约 5 个交易日的 60 分钟 K 线。",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="股票代码，例如 '600519'",
+        ),
+        ToolParameter(
+            name="days",
+            type="integer",
+            description="获取的最近日历天数（默认：5）",
+            required=False,
+            default=5,
+        ),
+    ],
+    handler=_handle_get_minutely_history,
+    category="data",
+)
+
+ALL_DATA_TOOLS.append(get_minutely_history_tool)
+
+
+# ============================================================
+# get_financial_history — quarterly financial reports
+# ============================================================
+
+def _handle_get_financial_history(stock_code: str, quarters: int = 4) -> dict:
+    """Get last N quarterly financial reports for trend analysis."""
+    db = _get_db()
+    raw = db.get_financial_reports(stock_code, limit=max(quarters, 1) * 2)
+
+    if not raw:
+        return {
+            "stock_code": stock_code,
+            "status": "no_data",
+            "note": "No financial report data available in database.",
+            "quarters": [],
+        }
+
+    # Deduplicate by report_date, keep most recent N unique quarters
+    seen = set()
+    deduped = []
+    for r in raw:
+        key = str(r.get("report_date"))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+
+    quarters_list = deduped[:quarters]
+
+    return {
+        "stock_code": stock_code,
+        "status": "ok",
+        "quarter_count": len(quarters_list),
+        "quarters": quarters_list,
+    }
+
+
+get_financial_history_tool = ToolDefinition(
+    name="get_financial_history",
+    description="获取股票最近 N 个季度的财报（营收、利润、毛利率、ROE、EPS）。"
+                "SEPA 盈利分析的核心输入，用于同比趋势评估。"
+                "按从旧到新的顺序返回季度数据，便于趋势阅读。",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="股票代码，例如 '600519'",
+        ),
+        ToolParameter(
+            name="quarters",
+            type="integer",
+            description="获取的季度数量（默认：4）",
+            required=False,
+            default=4,
+        ),
+    ],
+    handler=_handle_get_financial_history,
+    category="data",
+)
+
+ALL_DATA_TOOLS.append(get_financial_history_tool)
+
+
+# ============================================================
+# get_52w_range — 52-week high / low
+# ============================================================
+
+def _handle_get_52w_range(stock_code: str) -> dict:
+    """Calculate 52-week high, low, and current distance percentages."""
+    from src.services.history_loader import load_history_df
+
+    df, source = load_history_df(stock_code, days=300)
+    if df is None or df.empty or len(df) < 50:
+        return {
+            "stock_code": stock_code,
+            "status": "insufficient_data",
+            "note": f"Need at least 50 trading days of history, got {len(df) if df is not None else 0}.",
+        }
+
+    df = df.sort_values("date").reset_index(drop=True)
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+
+    current_price = float(close.iloc[-1])
+    recent_252 = min(252, len(df))
+    high_52w = float(high.tail(recent_252).max())
+    low_52w = float(low.tail(recent_252).min())
+
+    pct_from_high = round((current_price - high_52w) / high_52w * 100, 2) if high_52w > 0 else None
+    pct_from_low = round((current_price - low_52w) / low_52w * 100, 2) if low_52w > 0 else None
+
+    return {
+        "stock_code": stock_code,
+        "status": "ok",
+        "source": source,
+        "data_points": len(df),
+        "current_price": round(current_price, 2),
+        "high_52w": round(high_52w, 2),
+        "low_52w": round(low_52w, 2),
+        "pct_from_52w_high": pct_from_high,
+        "pct_from_52w_low": pct_from_low,
+        "within_25pct_of_high": pct_from_high is not None and pct_from_high >= -25,
+        "above_130pct_of_low": pct_from_low is not None and pct_from_low >= 30,
+    }
+
+
+get_52w_range_tool = ToolDefinition(
+    name="get_52w_range",
+    description="计算股票 52 周最高价/最低价及当前价格相对位置。"
+                "SEPA 趋势模板第 6、7 条的核心输入。"
+                "返回当前价、52 周高低点及偏离百分比。",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="股票代码，例如 '600519'",
+        ),
+    ],
+    handler=_handle_get_52w_range,
+    category="data",
+)
+
+ALL_DATA_TOOLS.append(get_52w_range_tool)
+
+
+# ============================================================
+# get_relative_strength — RS ranking vs CSI300
+# ============================================================
+
+def _handle_get_relative_strength(stock_code: str) -> dict:
+    """Compute 1-year return vs CSI300 (000300) for RS ranking."""
+    from src.services.history_loader import load_history_df
+
+    stock_df, stock_source = load_history_df(stock_code, days=300)
+    index_df, index_source = load_history_df("000300", days=300)
+
+    if stock_df is None or stock_df.empty or len(stock_df) < 100:
+        return {
+            "stock_code": stock_code,
+            "status": "insufficient_data",
+            "note": f"Stock history insufficient ({len(stock_df) if stock_df is not None else 0} bars).",
+        }
+
+    stock_df = stock_df.sort_values("date").reset_index(drop=True)
+    stock_return = float(stock_df["close"].iloc[-1]) / float(stock_df["close"].iloc[0]) - 1
+    stock_return_pct = round(stock_return * 100, 2)
+
+    index_return_pct = None
+    if index_df is not None and not index_df.empty and len(index_df) >= 100:
+        index_df = index_df.sort_values("date").reset_index(drop=True)
+        index_return = float(index_df["close"].iloc[-1]) / float(index_df["close"].iloc[0]) - 1
+        index_return_pct = round(index_return * 100, 2)
+
+    rs_ratio = None
+    if index_return_pct is not None:
+        # RS = stock return / index return, capped for extreme index moves
+        if abs(index_return_pct) < 0.01:
+            rs_ratio = round(stock_return_pct / 0.01, 2)
+        else:
+            rs_ratio = round(stock_return_pct / index_return_pct, 2)
+
+    # Approximate percentile: assume normal-ish distribution, simplistic estimate
+    rs_rank_pct = None
+    if rs_ratio is not None:
+        rs_rank_pct = min(99, max(1, int(50 + (rs_ratio - 1) * 25)))
+
+    return {
+        "stock_code": stock_code,
+        "status": "ok",
+        "stock_source": stock_source,
+        "index_source": index_source if index_df is not None else "none",
+        "stock_return_1y_pct": stock_return_pct,
+        "index_return_1y_pct": index_return_pct,
+        "rs_ratio": rs_ratio,
+        "rs_rank_pct": rs_rank_pct,
+        "pass_sepa_rs_70": rs_rank_pct is not None and rs_rank_pct >= 70,
+    }
+
+
+get_relative_strength_tool = ToolDefinition(
+    name="get_relative_strength",
+    description="计算股票近 1 年涨幅相对沪深 300 指数（000300）的相对强度（RS）。"
+                "返回 RS 比值、近似百分位排名，以及是否通过 SEPA 趋势模板第 8 条（RS >= 70）。"
+                "识别市场领导股的关键指标。",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="股票代码，例如 '600519'",
+        ),
+    ],
+    handler=_handle_get_relative_strength,
+    category="data",
+)
+
+ALL_DATA_TOOLS.append(get_relative_strength_tool)

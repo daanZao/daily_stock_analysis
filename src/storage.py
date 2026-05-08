@@ -66,57 +66,138 @@ if TYPE_CHECKING:
 
 # === 数据模型定义 ===
 
+class StockBasicInfo(Base):
+    """
+    股票基本信息模型
+
+    存储个股/指数的基础 metadata，用于分析时快速获取
+    股票名称、市场、行业等上下文，减少实时查询依赖。
+    """
+    __tablename__ = 'stock_basic_info'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(16), nullable=False, index=True)
+    name = Column(String(128))
+    market = Column(String(8))  # sh / sz / bj / hk / us
+    security_type = Column(String(16), default='stock')  # stock / index / etf
+    industry = Column(String(128))
+    list_date = Column(Date)
+    status = Column(String(16), default='listed')  # listed / delisted / suspended
+    total_shares = Column(BigInteger)
+    float_shares = Column(BigInteger)
+    data_source = Column(String(50))
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('code', name='uix_stock_basic_code'),
+        Index('ix_stock_basic_code', 'code'),
+    )
+
+    def __repr__(self):
+        return f"<StockBasicInfo(code={self.code}, name={self.name})>"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'code': self.code,
+            'name': self.name,
+            'market': self.market,
+            'security_type': self.security_type,
+            'industry': self.industry,
+            'list_date': self.list_date.isoformat() if self.list_date else None,
+            'status': self.status,
+            'total_shares': self.total_shares,
+            'float_shares': self.float_shares,
+            'data_source': self.data_source,
+        }
+
+
 class StockDaily(Base):
     """
     股票日线数据模型
-    
+
     存储每日行情数据和计算的技术指标
     支持多股票、多日期的唯一约束
     """
     __tablename__ = 'stock_daily'
-    
+
     # 主键
     id = Column(Integer, primary_key=True, autoincrement=True)
-    
+
     # 股票代码（如 600519, 000001）
     code = Column(String(10), nullable=False, index=True)
-    
+
     # 交易日期
     date = Column(Date, nullable=False, index=True)
-    
+
     # OHLC 数据
     open = Column(Float)
     high = Column(Float)
     low = Column(Float)
     close = Column(Float)
-    
+
     # 成交数据
     volume = Column(Float)  # 成交量（股）
     amount = Column(Float)  # 成交额（元）
     pct_chg = Column(Float)  # 涨跌幅（%）
-    
-    # 技术指标
+
+    # 移动平均线
     ma5 = Column(Float)
     ma10 = Column(Float)
     ma20 = Column(Float)
+    ma50 = Column(Float)
+    ma60 = Column(Float)
+    ma150 = Column(Float)
+    ma200 = Column(Float)
     volume_ratio = Column(Float)  # 量比
-    
+
+    # MACD 指标
+    macd_dif = Column(Float)
+    macd_dea = Column(Float)
+    macd_bar = Column(Float)
+    macd_signal = Column(String(8))  # golden_cross / dead_cross / none
+
+    # RSI 指标 (Wilder's smoothing, 6/12/24)
+    rsi_6 = Column(Float)
+    rsi_12 = Column(Float)
+    rsi_24 = Column(Float)
+    rsi_signal = Column(String(8))  # overbought / oversold / neutral
+
+    # KDJ 指标 (9,3,3)
+    kdj_k = Column(Float)
+    kdj_d = Column(Float)
+    kdj_j = Column(Float)
+    kdj_signal = Column(String(8))  # golden_cross / dead_cross / overbought / oversold / none
+
+    # 乖离率 (Bias)
+    bias_ma5 = Column(Float)
+    bias_ma10 = Column(Float)
+    bias_ma20 = Column(Float)
+
+    # 布林带 (BOLL, 20,2)
+    boll_mid = Column(Float)
+    boll_upper = Column(Float)
+    boll_lower = Column(Float)
+
+    # K线形态
+    candle_pattern = Column(String(32))  # e.g. bullish_engulfing, doji, hammer
+
     # 数据来源
     data_source = Column(String(50))  # 记录数据来源（如 AkshareFetcher）
-    
+
     # 更新时间
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-    
+
     # 唯一约束：同一股票同一日期只能有一条数据
     __table_args__ = (
         UniqueConstraint('code', 'date', name='uix_code_date'),
         Index('ix_code_date', 'code', 'date'),
     )
-    
+
     def __repr__(self):
         return f"<StockDaily(code={self.code}, date={self.date}, close={self.close})>"
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
@@ -132,7 +213,191 @@ class StockDaily(Base):
             'ma5': self.ma5,
             'ma10': self.ma10,
             'ma20': self.ma20,
+            'ma50': self.ma50,
+            'ma60': self.ma60,
+            'ma150': self.ma150,
+            'ma200': self.ma200,
             'volume_ratio': self.volume_ratio,
+            'macd_dif': self.macd_dif,
+            'macd_dea': self.macd_dea,
+            'macd_bar': self.macd_bar,
+            'macd_signal': self.macd_signal,
+            'rsi_6': self.rsi_6,
+            'rsi_12': self.rsi_12,
+            'rsi_24': self.rsi_24,
+            'rsi_signal': self.rsi_signal,
+            'kdj_k': self.kdj_k,
+            'kdj_d': self.kdj_d,
+            'kdj_j': self.kdj_j,
+            'kdj_signal': self.kdj_signal,
+            'bias_ma5': self.bias_ma5,
+            'bias_ma10': self.bias_ma10,
+            'bias_ma20': self.bias_ma20,
+            'boll_mid': self.boll_mid,
+            'boll_upper': self.boll_upper,
+            'boll_lower': self.boll_lower,
+            'candle_pattern': self.candle_pattern,
+            'data_source': self.data_source,
+        }
+
+
+class StockMinutely(Base):
+    """
+    股票60分钟K线数据模型
+
+    存储60分钟级别行情数据，用于日内趋势分析和
+    短周期技术指标计算。
+    """
+    __tablename__ = 'stock_minutely'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(16), nullable=False, index=True)
+    date = Column(Date, nullable=False, index=True)
+    time = Column(String(8), nullable=False)  # HHMMSS, e.g. "103000"
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    volume = Column(Float)   # 成交量（股）
+    amount = Column(Float)   # 成交额（元）
+    pct_chg = Column(Float)  # 涨跌幅（%）
+    data_source = Column(String(50))
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('code', 'date', 'time', name='uix_minutely_code_date_time'),
+        Index('ix_minutely_code_date', 'code', 'date'),
+        Index('ix_minutely_code_time', 'code', 'time'),
+    )
+
+    def __repr__(self):
+        return f"<StockMinutely(code={self.code}, date={self.date}, time={self.time}, close={self.close})>"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'code': self.code,
+            'date': self.date,
+            'time': self.time,
+            'open': self.open,
+            'high': self.high,
+            'low': self.low,
+            'close': self.close,
+            'volume': self.volume,
+            'amount': self.amount,
+            'pct_chg': self.pct_chg,
+            'data_source': self.data_source,
+        }
+
+
+class FinancialReport(Base):
+    """
+    结构化财报表（季度数据）
+
+    存储核心财务指标，支持趋势对比和 LLM 分析。
+    """
+    __tablename__ = 'financial_report'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(16), nullable=False, index=True)
+    report_date = Column(Date, nullable=False, index=True)
+    report_type = Column(String(10))  # Q1 / Q2 / Q3 / annual
+
+    # 利润表
+    revenue = Column(Float)
+    revenue_yoy = Column(Float)  # 营收同比增长率 (%)
+    net_profit_parent = Column(Float)
+    net_profit_yoy = Column(Float)  # 归母净利润同比增长率 (%)
+    gross_margin = Column(Float)  # 毛利率 (%)
+    net_margin = Column(Float)  # 净利率 (%)
+
+    # 资产负债
+    debt_ratio = Column(Float)  # 资产负债率 (%)
+
+    # 现金流
+    operating_cash_flow = Column(Float)
+
+    # 收益
+    roe = Column(Float)
+    roe_diluted = Column(Float)
+    eps = Column(Float)
+    net_profit_deducted = Column(Float)  # 扣除非经常性损益后的净利润
+
+    # 元数据
+    announced_date = Column(Date)
+    data_source = Column(String(50), default='akshare')
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('code', 'report_date', 'report_type', name='uix_financial_report'),
+    )
+
+    def __repr__(self):
+        return f"<FinancialReport(code={self.code}, date={self.report_date}, type={self.report_type})>"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'code': self.code,
+            'report_date': self.report_date.isoformat() if self.report_date else None,
+            'report_type': self.report_type,
+            'revenue': self.revenue,
+            'revenue_yoy': self.revenue_yoy,
+            'net_profit_parent': self.net_profit_parent,
+            'net_profit_yoy': self.net_profit_yoy,
+            'gross_margin': self.gross_margin,
+            'net_margin': self.net_margin,
+            'debt_ratio': self.debt_ratio,
+            'operating_cash_flow': self.operating_cash_flow,
+            'roe': self.roe,
+            'roe_diluted': self.roe_diluted,
+            'eps': self.eps,
+            'net_profit_deducted': self.net_profit_deducted,
+            'announced_date': self.announced_date.isoformat() if self.announced_date else None,
+            'data_source': self.data_source,
+        }
+
+
+class EarningsForecast(Base):
+    """
+    业绩预告（来自 baostock query_forecast_report）
+    """
+    __tablename__ = 'earnings_forecast'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(16), nullable=False, index=True)
+    forecast_date = Column(Date, nullable=False, index=True)
+    report_date = Column(Date)
+
+    forecast_type = Column(String(20))  # 预增/预减/扭亏/预亏/...
+    forecast_abstract = Column(Text)
+    chg_min = Column(Float)  # 净利润变动下限(%)
+    chg_max = Column(Float)  # 净利润变动上限(%)
+    net_profit_min = Column(Float)  # 净利润下限(万元)
+    net_profit_max = Column(Float)  # 净利润上限(万元)
+
+    data_source = Column(String(50), default='baostock')
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('code', 'forecast_date', name='uix_earnings_forecast'),
+    )
+
+    def __repr__(self):
+        return f"<EarningsForecast(code={self.code}, date={self.forecast_date}, type={self.forecast_type})>"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'code': self.code,
+            'forecast_date': self.forecast_date.isoformat() if self.forecast_date else None,
+            'report_date': self.report_date.isoformat() if self.report_date else None,
+            'forecast_type': self.forecast_type,
+            'forecast_abstract': self.forecast_abstract,
+            'chg_min': self.chg_min,
+            'chg_max': self.chg_max,
+            'net_profit_min': self.net_profit_min,
+            'net_profit_max': self.net_profit_max,
             'data_source': self.data_source,
         }
 
@@ -1865,24 +2130,24 @@ class DatabaseManager:
             return list(results)
     
     def save_daily_data(
-        self, 
-        df: pd.DataFrame, 
+        self,
+        df: pd.DataFrame,
         code: str,
         data_source: str = "Unknown"
     ) -> int:
         """
         保存日线数据到数据库
-        
+
         策略：
         - 按 `(code, date)` 做批量 UPSERT，已存在记录会覆盖更新
         - 同一批次内若存在重复日期，以最后一条记录为准
         - SQLite 分支按 chunk 写入以避免绑定参数上限
-        
+
         Args:
             df: 包含日线数据的 DataFrame
             code: 股票代码
             data_source: 数据来源名称
-            
+
         Returns:
             本次实际新增的记录数（不含更新）
         """
@@ -1891,27 +2156,33 @@ class DatabaseManager:
             return 0
 
         now = datetime.now()
+
+        # Column mapping from DataFrame to StockDaily model
+        _INDICATOR_COLS = [
+            'open', 'high', 'low', 'close',
+            'volume', 'amount', 'pct_chg',
+            'ma5', 'ma10', 'ma20', 'ma50', 'ma60', 'ma150', 'ma200', 'volume_ratio',
+            'macd_dif', 'macd_dea', 'macd_bar', 'macd_signal',
+            'rsi_6', 'rsi_12', 'rsi_24', 'rsi_signal',
+            'kdj_k', 'kdj_d', 'kdj_j', 'kdj_signal',
+            'bias_ma5', 'bias_ma10', 'bias_ma20',
+            'boll_mid', 'boll_upper', 'boll_lower',
+            'candle_pattern',
+        ]
+
         records_by_date: Dict[date, Dict[str, Any]] = {}
         for row in df.to_dict(orient='records'):
             row_date = self._normalize_daily_date(row.get('date'))
-            records_by_date[row_date] = {
+            record: Dict[str, Any] = {
                 'code': code,
                 'date': row_date,
-                'open': self._normalize_sql_value(row.get('open')),
-                'high': self._normalize_sql_value(row.get('high')),
-                'low': self._normalize_sql_value(row.get('low')),
-                'close': self._normalize_sql_value(row.get('close')),
-                'volume': self._normalize_sql_value(row.get('volume')),
-                'amount': self._normalize_sql_value(row.get('amount')),
-                'pct_chg': self._normalize_sql_value(row.get('pct_chg')),
-                'ma5': self._normalize_sql_value(row.get('ma5')),
-                'ma10': self._normalize_sql_value(row.get('ma10')),
-                'ma20': self._normalize_sql_value(row.get('ma20')),
-                'volume_ratio': self._normalize_sql_value(row.get('volume_ratio')),
                 'data_source': data_source,
                 'created_at': now,
                 'updated_at': now,
             }
+            for col in _INDICATOR_COLS:
+                record[col] = self._normalize_sql_value(row.get(col))
+            records_by_date[row_date] = record
 
         if not records_by_date:
             return 0
@@ -1921,12 +2192,7 @@ class DatabaseManager:
 
         def _write(session: Session) -> int:
             if self._is_sqlite_engine:
-                # SQLite has a per-statement bind-parameter limit (commonly 999).
-                # Each record has ~15 columns, so chunk upserts to stay within bounds.
                 _SQLITE_CHUNK = 50
-                # `_run_write_transaction()` opens SQLite writes with
-                # `BEGIN IMMEDIATE`, so existence checks and upsert execute
-                # within one stable write window.
                 existing_dates = set()
                 _COUNT_CHUNK = 500
                 for j in range(0, len(batch_dates), _COUNT_CHUNK):
@@ -1950,24 +2216,48 @@ class DatabaseManager:
                     chunk = records[i : i + _SQLITE_CHUNK]
                     stmt = sqlite_insert(StockDaily).values(chunk)
                     excluded = stmt.excluded
+                    upsert_set = {
+                        'open': excluded.open,
+                        'high': excluded.high,
+                        'low': excluded.low,
+                        'close': excluded.close,
+                        'volume': excluded.volume,
+                        'amount': excluded.amount,
+                        'pct_chg': excluded.pct_chg,
+                        'ma5': excluded.ma5,
+                        'ma10': excluded.ma10,
+                        'ma20': excluded.ma20,
+                        'ma50': excluded.ma50,
+                        'ma60': excluded.ma60,
+                        'ma150': excluded.ma150,
+                        'ma200': excluded.ma200,
+                        'volume_ratio': excluded.volume_ratio,
+                        'macd_dif': excluded.macd_dif,
+                        'macd_dea': excluded.macd_dea,
+                        'macd_bar': excluded.macd_bar,
+                        'macd_signal': excluded.macd_signal,
+                        'rsi_6': excluded.rsi_6,
+                        'rsi_12': excluded.rsi_12,
+                        'rsi_24': excluded.rsi_24,
+                        'rsi_signal': excluded.rsi_signal,
+                        'kdj_k': excluded.kdj_k,
+                        'kdj_d': excluded.kdj_d,
+                        'kdj_j': excluded.kdj_j,
+                        'kdj_signal': excluded.kdj_signal,
+                        'bias_ma5': excluded.bias_ma5,
+                        'bias_ma10': excluded.bias_ma10,
+                        'bias_ma20': excluded.bias_ma20,
+                        'boll_mid': excluded.boll_mid,
+                        'boll_upper': excluded.boll_upper,
+                        'boll_lower': excluded.boll_lower,
+                        'candle_pattern': excluded.candle_pattern,
+                        'data_source': excluded.data_source,
+                        'updated_at': excluded.updated_at,
+                    }
                     session.execute(
                         stmt.on_conflict_do_update(
                             index_elements=['code', 'date'],
-                            set_={
-                                'open': excluded.open,
-                                'high': excluded.high,
-                                'low': excluded.low,
-                                'close': excluded.close,
-                                'volume': excluded.volume,
-                                'amount': excluded.amount,
-                                'pct_chg': excluded.pct_chg,
-                                'ma5': excluded.ma5,
-                                'ma10': excluded.ma10,
-                                'ma20': excluded.ma20,
-                                'volume_ratio': excluded.volume_ratio,
-                                'data_source': excluded.data_source,
-                                'updated_at': excluded.updated_at,
-                            },
+                            set_=upsert_set,
                         )
                     )
                 return len(new_records)
@@ -1990,17 +2280,8 @@ class DatabaseManager:
                         session.add(StockDaily(**record))
                         new_count += 1
                         continue
-                    existing.open = record['open']
-                    existing.high = record['high']
-                    existing.low = record['low']
-                    existing.close = record['close']
-                    existing.volume = record['volume']
-                    existing.amount = record['amount']
-                    existing.pct_chg = record['pct_chg']
-                    existing.ma5 = record['ma5']
-                    existing.ma10 = record['ma10']
-                    existing.ma20 = record['ma20']
-                    existing.volume_ratio = record['volume_ratio']
+                    for col in _INDICATOR_COLS:
+                        setattr(existing, col, record.get(col))
                     existing.data_source = record['data_source']
                     existing.updated_at = record['updated_at']
                 return new_count
@@ -2016,63 +2297,479 @@ class DatabaseManager:
             logger.error(f"保存 {code} 数据失败: {e}")
             raise
     
+    def save_minutely_data(
+        self,
+        df: pd.DataFrame,
+        code: str,
+        data_source: str = "Unknown",
+    ) -> int:
+        """
+        保存60分钟K线数据到数据库
+
+        按 `(code, date, time)` 做批量 UPSERT。
+
+        Args:
+            df: 包含60分钟K线数据的 DataFrame（必须含 date, time 列）
+            code: 股票代码
+            data_source: 数据来源名称
+
+        Returns:
+            本次实际新增的记录数（不含更新）
+        """
+        if df is None or df.empty:
+            logger.warning(f"保存60分钟数据为空，跳过 {code}")
+            return 0
+
+        now = datetime.now()
+        _COLS = ['date', 'time', 'open', 'high', 'low', 'close', 'volume', 'amount', 'pct_chg']
+
+        records: List[Dict[str, Any]] = []
+        for row in df.to_dict(orient='records'):
+            record: Dict[str, Any] = {
+                'code': code,
+                'data_source': data_source,
+                'created_at': now,
+                'updated_at': now,
+            }
+            for col in _COLS:
+                val = row.get(col)
+                if col == 'date':
+                    record[col] = self._normalize_daily_date(val)
+                else:
+                    record[col] = self._normalize_sql_value(val)
+            records.append(record)
+
+        if not records:
+            return 0
+
+        def _write(session: Session) -> int:
+            if self._is_sqlite_engine:
+                _SQLITE_CHUNK = 50
+                for i in range(0, len(records), _SQLITE_CHUNK):
+                    chunk = records[i : i + _SQLITE_CHUNK]
+                    stmt = sqlite_insert(StockMinutely).values(chunk)
+                    excluded = stmt.excluded
+                    session.execute(
+                        stmt.on_conflict_do_update(
+                            index_elements=['code', 'date', 'time'],
+                            set_={
+                                'open': excluded.open,
+                                'high': excluded.high,
+                                'low': excluded.low,
+                                'close': excluded.close,
+                                'volume': excluded.volume,
+                                'amount': excluded.amount,
+                                'pct_chg': excluded.pct_chg,
+                                'data_source': excluded.data_source,
+                                'updated_at': excluded.updated_at,
+                            },
+                        )
+                    )
+                # We don't track new vs update for minutely data;
+                # return total records as a proxy.
+                return len(records)
+            else:
+                for record in records:
+                    session.merge(StockMinutely(**record))
+                return len(records)
+
+        try:
+            saved_count = self._run_write_transaction(
+                f"save_minutely_data[{code}]",
+                _write,
+            )
+            logger.info(f"保存 {code} 60分钟数据成功，共 {saved_count} 条")
+            return saved_count
+        except Exception as e:
+            logger.error(f"保存 {code} 60分钟数据失败: {e}")
+            raise
+
+    def save_stock_basic_info(
+        self,
+        code: str,
+        name: Optional[str] = None,
+        market: Optional[str] = None,
+        security_type: Optional[str] = None,
+        industry: Optional[str] = None,
+        list_date: Optional[date] = None,
+        status: Optional[str] = None,
+        total_shares: Optional[int] = None,
+        float_shares: Optional[int] = None,
+        data_source: str = "Unknown",
+    ) -> bool:
+        """
+        保存或更新股票基本信息
+
+        Args:
+            code: 股票代码
+            name: 股票名称
+            market: 市场 (sh/sz/bj/hk/us)
+            security_type: 证券类型 (stock/index/etf)
+            industry: 所属行业
+            list_date: 上市日期
+            status: 上市状态
+            total_shares: 总股本
+            float_shares: 流通股本
+            data_source: 数据来源
+
+        Returns:
+            是否保存成功
+        """
+        now = datetime.now()
+
+        def _write(session: Session) -> bool:
+            existing = session.execute(
+                select(StockBasicInfo).where(StockBasicInfo.code == code)
+            ).scalar_one_or_none()
+
+            if existing is None:
+                session.add(StockBasicInfo(
+                    code=code,
+                    name=name,
+                    market=market,
+                    security_type=security_type,
+                    industry=industry,
+                    list_date=list_date,
+                    status=status,
+                    total_shares=total_shares,
+                    float_shares=float_shares,
+                    data_source=data_source,
+                    created_at=now,
+                    updated_at=now,
+                ))
+            else:
+                if name is not None:
+                    existing.name = name
+                if market is not None:
+                    existing.market = market
+                if security_type is not None:
+                    existing.security_type = security_type
+                if industry is not None:
+                    existing.industry = industry
+                if list_date is not None:
+                    existing.list_date = list_date
+                if status is not None:
+                    existing.status = status
+                if total_shares is not None:
+                    existing.total_shares = total_shares
+                if float_shares is not None:
+                    existing.float_shares = float_shares
+                existing.data_source = data_source
+                existing.updated_at = now
+            return True
+
+        try:
+            self._run_write_transaction(f"save_stock_basic_info[{code}]", _write)
+            logger.info(f"保存 {code} 基本信息成功")
+            return True
+        except Exception as e:
+            logger.error(f"保存 {code} 基本信息失败: {e}")
+            return False
+
+    def get_stock_basic_info(self, code: str) -> Optional[Dict[str, Any]]:
+        """获取股票基本信息字典，不存在返回 None。"""
+        with self.get_session() as session:
+            row = session.execute(
+                select(StockBasicInfo).where(StockBasicInfo.code == code)
+            ).scalar_one_or_none()
+            return row.to_dict() if row else None
+
+    def save_financial_report(
+        self,
+        code: str,
+        report_date: date,
+        report_type: Optional[str] = None,
+        revenue: Optional[float] = None,
+        revenue_yoy: Optional[float] = None,
+        net_profit_parent: Optional[float] = None,
+        net_profit_yoy: Optional[float] = None,
+        gross_margin: Optional[float] = None,
+        net_margin: Optional[float] = None,
+        debt_ratio: Optional[float] = None,
+        operating_cash_flow: Optional[float] = None,
+        roe: Optional[float] = None,
+        roe_diluted: Optional[float] = None,
+        eps: Optional[float] = None,
+        net_profit_deducted: Optional[float] = None,
+        announced_date: Optional[date] = None,
+        data_source: str = "Unknown",
+    ) -> bool:
+        """保存或更新财报表数据。"""
+        now = datetime.now()
+
+        def _write(session: Session) -> bool:
+            existing = session.execute(
+                select(FinancialReport).where(
+                    and_(
+                        FinancialReport.code == code,
+                        FinancialReport.report_date == report_date,
+                    )
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                session.add(FinancialReport(
+                    code=code,
+                    report_date=report_date,
+                    report_type=report_type,
+                    revenue=revenue,
+                    revenue_yoy=revenue_yoy,
+                    net_profit_parent=net_profit_parent,
+                    net_profit_yoy=net_profit_yoy,
+                    gross_margin=gross_margin,
+                    net_margin=net_margin,
+                    debt_ratio=debt_ratio,
+                    operating_cash_flow=operating_cash_flow,
+                    roe=roe,
+                    roe_diluted=roe_diluted,
+                    eps=eps,
+                    net_profit_deducted=net_profit_deducted,
+                    announced_date=announced_date,
+                    data_source=data_source,
+                    created_at=now,
+                    updated_at=now,
+                ))
+            else:
+                if report_type is not None:
+                    existing.report_type = report_type
+                if revenue is not None:
+                    existing.revenue = revenue
+                if revenue_yoy is not None:
+                    existing.revenue_yoy = revenue_yoy
+                if net_profit_parent is not None:
+                    existing.net_profit_parent = net_profit_parent
+                if net_profit_yoy is not None:
+                    existing.net_profit_yoy = net_profit_yoy
+                if gross_margin is not None:
+                    existing.gross_margin = gross_margin
+                if net_margin is not None:
+                    existing.net_margin = net_margin
+                if debt_ratio is not None:
+                    existing.debt_ratio = debt_ratio
+                if operating_cash_flow is not None:
+                    existing.operating_cash_flow = operating_cash_flow
+                if roe is not None:
+                    existing.roe = roe
+                if roe_diluted is not None:
+                    existing.roe_diluted = roe_diluted
+                if eps is not None:
+                    existing.eps = eps
+                if net_profit_deducted is not None:
+                    existing.net_profit_deducted = net_profit_deducted
+                if announced_date is not None:
+                    existing.announced_date = announced_date
+                existing.data_source = data_source
+                existing.updated_at = now
+            return True
+
+        try:
+            self._run_write_transaction(f"save_financial_report[{code}]", _write)
+            return True
+        except Exception as e:
+            logger.error(f"保存 {code} 财报表失败: {e}")
+            return False
+
+    def get_minutely_data(
+        self,
+        code: str,
+        days: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """获取最近 N 个交易日的 60 分钟 K 线数据（按日期+时间升序）。"""
+        from datetime import timedelta
+        end = date.today()
+        start = end - timedelta(days=days * 2 + 5)
+        with self.get_session() as session:
+            rows = session.execute(
+                select(StockMinutely)
+                .where(
+                    StockMinutely.code == code,
+                    StockMinutely.date >= start,
+                    StockMinutely.date <= end,
+                )
+                .order_by(StockMinutely.date, StockMinutely.time)
+            ).scalars().all()
+            return [r.to_dict() for r in rows]
+
+    def get_financial_reports(
+        self,
+        code: str,
+        limit: int = 8,
+    ) -> List[Dict[str, Any]]:
+        """获取最近 N 条财报表记录（按报告期倒序）。"""
+        with self.get_session() as session:
+            rows = session.execute(
+                select(FinancialReport)
+                .where(FinancialReport.code == code)
+                .order_by(desc(FinancialReport.report_date))
+                .limit(limit)
+            ).scalars().all()
+            return [r.to_dict() for r in rows]
+
+    def save_earnings_forecast(
+        self,
+        code: str,
+        forecast_date: date,
+        report_date: Optional[date] = None,
+        forecast_type: Optional[str] = None,
+        forecast_abstract: Optional[str] = None,
+        chg_min: Optional[float] = None,
+        chg_max: Optional[float] = None,
+        net_profit_min: Optional[float] = None,
+        net_profit_max: Optional[float] = None,
+        data_source: str = "baostock",
+    ) -> bool:
+        """保存或更新业绩预告数据。"""
+        now = datetime.now()
+
+        def _write(session: Session) -> bool:
+            existing = session.execute(
+                select(EarningsForecast).where(
+                    and_(
+                        EarningsForecast.code == code,
+                        EarningsForecast.forecast_date == forecast_date,
+                    )
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                session.add(EarningsForecast(
+                    code=code,
+                    forecast_date=forecast_date,
+                    report_date=report_date,
+                    forecast_type=forecast_type,
+                    forecast_abstract=forecast_abstract,
+                    chg_min=chg_min,
+                    chg_max=chg_max,
+                    net_profit_min=net_profit_min,
+                    net_profit_max=net_profit_max,
+                    data_source=data_source,
+                    created_at=now,
+                    updated_at=now,
+                ))
+            else:
+                if report_date is not None:
+                    existing.report_date = report_date
+                if forecast_type is not None:
+                    existing.forecast_type = forecast_type
+                if forecast_abstract is not None:
+                    existing.forecast_abstract = forecast_abstract
+                if chg_min is not None:
+                    existing.chg_min = chg_min
+                if chg_max is not None:
+                    existing.chg_max = chg_max
+                if net_profit_min is not None:
+                    existing.net_profit_min = net_profit_min
+                if net_profit_max is not None:
+                    existing.net_profit_max = net_profit_max
+                existing.data_source = data_source
+                existing.updated_at = now
+            return True
+
+        try:
+            self._run_write_transaction(f"save_earnings_forecast[{code}]", _write)
+            return True
+        except Exception as e:
+            logger.error(f"保存 {code} 业绩预告失败: {e}")
+            return False
+
+    def get_earnings_forecasts(
+        self,
+        code: str,
+        limit: int = 4,
+    ) -> List[Dict[str, Any]]:
+        """获取最近 N 条业绩预告记录（按公告日期倒序）。"""
+        with self.get_session() as session:
+            rows = session.execute(
+                select(EarningsForecast)
+                .where(EarningsForecast.code == code)
+                .order_by(desc(EarningsForecast.forecast_date))
+                .limit(limit)
+            ).scalars().all()
+            return [r.to_dict() for r in rows]
+
+    def get_latest_indicators(
+        self,
+        code: str,
+        days: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """获取最近 N 天的技术指标（从 StockDaily 读取）。"""
+        with self.get_session() as session:
+            rows = session.execute(
+                select(StockDaily)
+                .where(StockDaily.code == code)
+                .order_by(desc(StockDaily.date))
+                .limit(days)
+            ).scalars().all()
+            return [r.to_dict() for r in rows]
+
     def get_analysis_context(
-        self, 
+        self,
         code: str,
         target_date: Optional[date] = None
     ) -> Optional[Dict[str, Any]]:
         """
         获取分析所需的上下文数据
-        
-        返回今日数据 + 昨日数据的对比信息
-        
+
+        返回今日数据 + 昨日数据 + 最近5日技术指标 + 财报/预告数据
+
         Args:
             code: 股票代码
             target_date: 目标日期（默认今天）
-            
+
         Returns:
-            包含今日数据、昨日对比等信息的字典
+            包含今日数据、昨日对比、技术指标、财务数据的字典
         """
         if target_date is None:
             target_date = date.today()
-        # 注意：尽管入参提供了 target_date，但当前实现实际使用的是“最新两天数据”（get_latest_data），
-        # 并不会按 target_date 精确取当日/前一交易日的上下文。
-        # 因此若未来需要支持“按历史某天复盘/重算”的可解释性，这里需要调整。
-        # 该行为目前保留（按需求不改逻辑）。
-        
+
         # 获取最近2天数据
         recent_data = self.get_latest_data(code, days=2)
-        
+
         if not recent_data:
             logger.warning(f"未找到 {code} 的数据")
             return None
-        
+
         today_data = recent_data[0]
         yesterday_data = recent_data[1] if len(recent_data) > 1 else None
-        
+
         context = {
             'code': code,
             'date': today_data.date.isoformat(),
             'today': today_data.to_dict(),
         }
-        
+
         if yesterday_data:
             context['yesterday'] = yesterday_data.to_dict()
-            
+
             # 计算相比昨日的变化
             if yesterday_data.volume and yesterday_data.volume > 0:
                 context['volume_change_ratio'] = round(
                     today_data.volume / yesterday_data.volume, 2
                 )
-            
+
             if yesterday_data.close and yesterday_data.close > 0:
                 context['price_change_ratio'] = round(
                     (today_data.close - yesterday_data.close) / yesterday_data.close * 100, 2
                 )
-            
+
             # 均线形态判断
             context['ma_status'] = self._analyze_ma_status(today_data)
-        
+
+        # 最近5日技术指标（用于趋势判断）
+        recent_indicators = self.get_latest_indicators(code, days=5)
+        if recent_indicators:
+            context['recent_indicators'] = recent_indicators
+
+        # 最近4个季度财报
+        financial_reports = self.get_financial_reports(code, limit=4)
+        if financial_reports:
+            context['financial_reports'] = financial_reports
+
+        # 最近业绩预告
+        earnings_forecasts = self.get_earnings_forecasts(code, limit=2)
+        if earnings_forecasts:
+            context['earnings_forecasts'] = earnings_forecasts
+
         return context
     
     def _analyze_ma_status(self, data: StockDaily) -> str:

@@ -19,11 +19,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 新增 MARKET_DATA_SYNC_ENABLED 环境变量开关（默认 true），控制收盘市场数据同步行为
 - [改进] MarketDataSync 默认使用 get_effective_trading_date("cn") 对齐最近交易日，避免节假日/跨日边界的数据日期错位
 - [文档] 新增 docs/DATA_PIPELINE.md，阐述项目 A 股数据抓取、持久化、多源对齐与消费的全景链路
+- [新功能] StockDaily 扩表：新增 MA60、MACD(12/26/9)、RSI(6/12/24 Wilder)、KDJ(9/3/3)、乖离率(MA5/10/20)、布林带(20,2)、单K线形态等 23 个预计算指标字段
+- [新功能] 新增 stock_minutely 表：存储 Baostock 60分钟K线数据（个股），支持日内短周期分析
+- [新功能] 新增 stock_basic_info 表：存储个股/指数基础 metadata（名称、行业、上市日期、股本等）
+- [新功能] 新增 financial_report 表：存储季度结构化财报（营收、净利、毛利率、ROE、EPS 等）
+- [新功能] 新增 earnings_forecast 表：存储 baostock 业绩预告（预增/预减/扭亏/预亏及净利润变动区间）
+- [新功能] BaostockFetcher 新增 get_minutely_data（60分钟K线）、get_growth_data（季频成长能力）、get_forecast_report（季频业绩预告）接口
+- [新功能] DataFetcherManager 新增 get_minutely_data 路由方法
+- [新功能] DatabaseManager 新增 save_minutely_data、save_stock_basic_info、save_financial_report、save_earnings_forecast、get_latest_indicators 等方法
+- [改进] _calculate_indicators 重写：基于完整2年日线历史计算，min_periods 严格等于窗口大小，MACD 使用标准 EMA 递推，RSI 改用 Wilder's smoothing（ewm alpha=1/N），确保与看盘软件收敛一致
+- [改进] analyzer.py _format_prompt 注入完整技术指标表格（MACD/RSI/KDJ/BOLL/乖离率/K线形态）、5日指标趋势、成长能力、资金流向、季度财报、业绩预告
+- [改进] get_analysis_context 增强：返回最近5日技术指标趋势、最近4个季度财报、最新业绩预告
+- [文档] docs/DATA_PIPELINE.md 更新：补充 60分钟K线/基本信息/财报/业绩预告表结构、数据源能力矩阵、技术指标预计算策略说明
+- [修复] 修复 src/analyzer.py 中智能引号被误用作 Python 字符串定界符导致的 SyntaxError
+- [修复] 修复 FinancialReport/EarningsForecast 重复索引定义（Column(index=True) 与显式 Index 同名）导致 SQLite create_all 报错的问题
 - [新功能] 大盘复盘支持港股市场：`MARKET_REVIEW_REGION` 新增 `hk` 选项；`both` 扩展为 A股+港股+美股，并新增港股指数（HSI/HSTECH/HSCEI）复盘链路。
 - [修复] Bot `/market` 命令复用 `get_open_markets_today()` / `compute_effective_region()` 做交易日过滤：结果作为 `override_region` 透传给 `run_market_review`；若结果为空字符串则跳过复盘并推送“今日相关市场休市”，与 CLI/调度入口行为一致。
 - [测试] 新增 `tests/test_bot_market_command.py`，覆盖 `MARKET_REVIEW_REGION=both` + open markets `{"cn","us"}` / `{"cn","hk"}` 的 `override_region` 透传断言，并覆盖全市场休市跳过与关闭交易日检查路径；新增 `tests/test_yfinance_hk_indices.py` 覆盖港股指数符号映射与部分/全部失败降级路径。
 - [修复] 问股 Agent 在未配置可用 LLM 时保留后端真实错误原因并维持 `done.success=false` 失败语义，避免前端把配置缺失误当成成功回答。
-- [文档] 补充 LLM 配置指南与 FAQ，明确问股 Agent 对 `LITELLM_CONFIG` / `LLM_CHANNELS` / legacy `GEMINI_*` `OPENAI_*` `ANTHROPIC_*` 的兼容优先级、回退路径与“不静默迁移旧配置”的结论。
+- [文档] 补充 LLM 配置指南与 FAQ，明确问股 Agent 对 `LITELLM_CONFIG` / `LLM_CHANNELS` / legacy `GEMINI_*` `OPENAI_*` `ANTHROPIC_*` 的兼容优先级、回退路径与”不静默迁移旧配置”的结论。
+- [新功能] Pipeline 新增 SEPA 数据质量门禁：在 `_enhance_context` 之后检查历史日线、均线（MA50/150/200）、季度业绩数据的完整性，最多 3 次重试抓取，3 次后仍缺失直接返回 `AnalysisResult(success=False)` 不再调用 LLM
+- [改进] `fundamental_retry_max` 默认值从 1 调整为 3，基本面数据抓取失败时有更多重试机会
+- [新功能] `AkshareFundamentalAdapter` 新增 Baostock fallback：当 AkShare 财务指标接口全部失败时，自动尝试 Baostock 的 `query_profit_data` / `query_growth_data` / `query_forecast_report` 获取 ROE、毛利率、净利润同比、业绩预告等数据
+- [修复] 修复 `history_service._rebuild_analysis_result` 中 `dict.get(key, default)` 在 raw_result 包含 `”key”: null` 时返回 `None` 而不是 fallback 的问题（导致 AnalysisResult 重建失败）
+- [修复] 修复 `history_service._backfill_from_dashboard` 中 `positive_catalysts` / `latest_news` / `risk_alerts` 列表元素为字符串时被当作 dict 调用 `.get()` 导致的 AttributeError
 - [修复] Agent 模式未生成有效决策仪表盘时保留本地趋势分析的评分、趋势和操作建议，并将强买/强卖 fallback 归一到兼容的 `buy`/`sell` 决策类型，避免首页结果被 `50 / 观望 / 未知` 缺省值覆盖。
 - [修复] 持仓快照现价缺失时不再静默回退为持仓成本；当天快照优先使用历史收盘价，仅在缺失时使用实时价 fallback，缺价持仓不再污染市值与未实现盈亏汇总，并为持仓明细返回价格来源、日期、stale 与缺价状态。
 - [测试] 补齐 `task_queue` 轻量导入 stub 的股票代码规范化函数，恢复 `tests/test_task_queue_config_sync.py` 收集与运行。
@@ -119,6 +138,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - 新增 `tests/test_bot_market_command.py`，覆盖 `MARKET_REVIEW_REGION=both` + open markets `{"cn","us"}` / `{"cn","hk"}` 的 `override_region` 透传断言，并覆盖全市场休市跳过与关闭交易日检查路径；新增 `tests/test_yfinance_hk_indices.py` 覆盖港股指数符号映射与部分/全部失败降级路径。
 - 补齐 `task_queue` 轻量导入 stub 的股票代码规范化函数，恢复 `tests/test_task_queue_config_sync.py` 收集与运行。
+- [修复] 分析 Prompt 在注入 `trend_analysis` 前按最终 `trend_status` / `ma_alignment` 清洗互斥理由：空头结构移除看多理由、多头结构移除空头结构风险，并在事件/技术冲突与异常放量（>10 倍）时强制提示”事件先行、技术待确认”与量能降权；本次仅改动 `src/analyzer.py` 的 Prompt 清洗辅助逻辑并补充 `tests/test_analyzer_news_prompt.py` 回归用例，未触及 `src/config.py`、LiteLLM/provider、模型名、Base URL 或运行时配置清理/迁移入口。
+- [新功能] Agent 分析工具新增 `analyze_relative_strength`，替代原有 `get_limit_up_down_stats`（涨停计数）；新工具基于个股 vs 沪深300的 RS Rating（波动率调整，1-99分）、MA20上方占比、创20日新高次数、收益回撤比、波动率等多维度评分，映射到 SEPA 等级 S/A/B/C/D，解决涨停计数在 A 股实际场景中无法准确反映 SEPA 动量要求的问题
+- [改进] SEPA 数据门禁检查逻辑从"记录存在性"升级为"关键字段有效数值"：financial_reports 和 fundamental_context.earnings 中的 revenue/net_profit_parent/roe 等字段必须至少有一个包含有效数字（0 也算），避免空壳记录误导 LLM 输出"基本面数据缺失"
+- [新功能] Agent 路径新增60分钟K线第二轮精修分析：日线SEPA分析完成后，若结论为买入/强烈买入，自动启动第二轮 `run_once()` 调用，基于60分钟RSI/MA20/K线形态精修入场时机（立即入场/等待回踩/放弃）
+- [改进] Classic 路径单轮增强：`format_analysis_prompt()` 新增60分钟K线数据段落（RSI14/MA20/量趋势/最新K线形态/最近10根走势），LLM在单轮内即可完成日线+60分钟综合分析
+- [改进] `AnalysisResult` 新增 `minutely_refinement` 字段，用于持久化60分钟精修结论；`history_service._rebuild_analysis_result` 已兼容该字段的反序列化
+- [改进] Analyzer SEPA 动量验证 Prompt 格式重构：替换原有”涨停/跌停/炸板/连板”为 RS Rating、SEPA评分、MA20上方占比、趋势一致性、创20日新高次数、区间收益、最大回撤等真正反映 SEPA Trend Template 的指标
+- [改进] Agent SEPA skill 提示词（`src/agent/skills/defaults.py`）同步更新：P2-动量验证从涨停计数体系（S/A/B/C/F）全面替换为 RS Rating 体系（S/A/B/C/D），数据输入规范移除”60日内涨停/跌停记录”，绝对禁止清单同步更新为”禁止买入 C级/D级动量股票”
+- [修复] Pipeline 导入缺失的 `_format_volume`：`_run_minutely_refinement` 调用未从 `src.analyzer` 导入的模块级函数，触发 `NameError` 后被 `except Exception` 静默吞掉，导致 Agent 路径 60 分钟精修功能每次返回 `None` 完全不可用
+- [修复] Pipeline `_validate_least_resistance` 方法内局部导入 `BuySignal` 提到文件顶部统一导入，减少运行时重复开销
+- [修复] Pipeline `_validate_least_resistance` 注释更新：明确说明当前仅覆盖做多方向的最小阻力校验，避免与”趋势、量能、RS 都指向同一方向”的笼统描述产生歧义
+- [修复] Pipeline `_run_minutely_refinement` JSON 兜底正则从贪婪匹配 `\{.*\}` 改为非贪婪 `\{.*?\}`，避免跨多个 JSON 块或 Markdown 代码块时误匹配到过大的非法范围
+- [修复] `analyzer._format_volume` 增加 `float()` 容错转换：即使传入字符串型 volume 也能安全处理，避免 `TypeError`
+- [修复] Pipeline Issue #234 realtime override 增加盘前状态检测：当 volume 为 0/None 且 open=high=low=close 时跳过 override，保留昨日真实交易数据，避免 LLM 看到”一字”形态产生涨停幻觉（如 000792.SZ 在 09:15 盘前被误判为”一字涨停”）
+- [修复] `_backfill_analysis_fields` 中 `news_summary` 解析兼容字符串列表元素：LLM 返回的 `latest_news` 列表中元素可能是 str 而非 dict，增加类型检测避免 `AttributeError: 'str' object has no attribute 'get'`
+- [文档] docs/agentTOOLS.md 更新：`get_limit_up_down_stats` 替换为 `analyze_relative_strength`，更新 SEPA 映射附录
 
 ## [3.14.1] - 2026-04-26
 - [测试] 修正大盘复盘 prompt 测试对“明日交易计划”标题的断言，并同步桌面端版本号，恢复发布 gate。

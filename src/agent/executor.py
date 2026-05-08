@@ -83,92 +83,19 @@ LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{mar
 
 {skills_section}
 
-## 输出格式：决策仪表盘 JSON
+## 输出格式
 
-你的最终响应必须是以下结构的有效 JSON 对象：
+**你只允许输出一个纯 JSON 对象，禁止输出 Markdown 表格、阶段说明、分析过程或任何其他格式。JSON 前后不要有任何解释性文字。**
 
-```json
-{{
-    "stock_name": "股票中文名称",
-    "sentiment_score": 0-100整数,
-    "trend_prediction": "强烈看多/看多/震荡/看空/强烈看空",
-    "operation_advice": "买入/加仓/持有/减仓/卖出/观望",
-    "decision_type": "buy/hold/sell",
-    "confidence_level": "高/中/低",
-    "dashboard": {{
-        "core_conclusion": {{
-            "one_sentence": "一句话核心结论（30字以内）",
-            "signal_type": "🟢买入信号/🟡持有观望/🔴卖出信号/⚠️风险警告",
-            "time_sensitivity": "立即行动/今日内/本周内/不急",
-            "position_advice": {{
-                "no_position": "空仓者建议",
-                "has_position": "持仓者建议"
-            }}
-        }},
-        "data_perspective": {{
-            "trend_status": {{"ma_alignment": "", "is_bullish": true, "trend_score": 0}},
-            "price_position": {{"current_price": 0, "ma5": 0, "ma10": 0, "ma20": 0, "bias_ma5": 0, "bias_status": "", "support_level": 0, "resistance_level": 0}},
-            "volume_analysis": {{"volume_ratio": 0, "volume_status": "", "turnover_rate": 0, "volume_meaning": ""}},
-            "chip_structure": {{"profit_ratio": 0, "avg_cost": 0, "concentration": 0, "chip_health": ""}}
-        }},
-        "intelligence": {{
-            "latest_news": "",
-            "risk_alerts": [],
-            "positive_catalysts": [],
-            "earnings_outlook": "",
-            "sentiment_summary": ""
-        }},
-        "battle_plan": {{
-            "sniper_points": {{"ideal_buy": "", "secondary_buy": "", "stop_loss": "", "take_profit": ""}},
-            "position_strategy": {{"suggested_position": "", "entry_plan": "", "risk_control": ""}},
-            "action_checklist": []
-        }}
-    }},
-    "analysis_summary": "100字综合分析摘要",
-    "key_points": "3-5个核心看点，逗号分隔",
-    "risk_warning": "风险提示",
-    "buy_reason": "操作理由，引用交易理念",
-    "trend_analysis": "走势形态分析",
-    "short_term_outlook": "短期1-3日展望",
-    "medium_term_outlook": "中期1-2周展望",
-    "technical_analysis": "技术面综合分析",
-    "ma_analysis": "均线系统分析",
-    "volume_analysis": "量能分析",
-    "pattern_analysis": "K线形态分析",
-    "fundamental_analysis": "基本面分析",
-    "sector_position": "板块行业分析",
-    "company_highlights": "公司亮点/风险",
-    "news_summary": "新闻摘要",
-    "market_sentiment": "市场情绪",
-    "hot_topics": "相关热点"
-}}
-```
+最终响应必须是有效的 JSON 对象，必须包含以下顶层字段：
 
-## 评分标准
+- `stock_name`, `sentiment_score`, `trend_prediction`, `operation_advice`, `decision_type`, `confidence_level`
+- `dashboard`: 含 `core_conclusion`（one_sentence, signal_type, time_sensitivity, position_advice）、`data_perspective`（trend_status, price_position, volume_analysis, chip_structure）、`intelligence`（latest_news, risk_alerts, positive_catalysts, earnings_outlook, sentiment_summary）、`battle_plan`（sniper_points, position_strategy, action_checklist）
+- `analysis_summary`, `key_points`, `risk_warning`, `buy_reason`
+- `trend_analysis`, `technical_analysis`, `ma_analysis`, `volume_analysis`, `pattern_analysis`
+- `fundamental_analysis`, `sector_position`, `company_highlights`, `news_summary`, `market_sentiment`, `hot_topics`
 
-### 强烈买入（80-100分）：
-- ✅ 多头排列：MA5 > MA10 > MA20
-- ✅ 低乖离率：<2%，最佳买点
-- ✅ 缩量回调或放量突破
-- ✅ 筹码集中健康
-- ✅ 消息面有利好催化
-
-### 买入（60-79分）：
-- ✅ 多头排列或弱势多头
-- ✅ 乖离率 <5%
-- ✅ 量能正常
-- ⚪ 允许一项次要条件不满足
-
-### 观望（40-59分）：
-- ⚠️ 乖离率 >5%（追高风险）
-- ⚠️ 均线缠绕趋势不明
-- ⚠️ 有风险事件
-
-### 卖出/减仓（0-39分）：
-- ❌ 空头排列
-- ❌ 跌破MA20
-- ❌ 放量下跌
-- ❌ 重大利空
+评分标准由激活的 `skill_policy` 定义（如有）。
 
 ## 决策仪表盘核心原则
 
@@ -214,89 +141,19 @@ AGENT_SYSTEM_PROMPT = """你是一位{market_role}投资分析 Agent，拥有数
 
 {skills_section}
 
-## 输出格式：决策仪表盘 JSON
+## 输出格式
 
-你的最终响应必须是以下结构的有效 JSON 对象：
+**你只允许输出一个纯 JSON 对象，禁止输出 Markdown 表格、阶段说明、分析过程或任何其他格式。JSON 前后不要有任何解释性文字。**
 
-```json
-{{
-    "stock_name": "股票中文名称",
-    "sentiment_score": 0-100整数,
-    "trend_prediction": "强烈看多/看多/震荡/看空/强烈看空",
-    "operation_advice": "买入/加仓/持有/减仓/卖出/观望",
-    "decision_type": "buy/hold/sell",
-    "confidence_level": "高/中/低",
-    "dashboard": {{
-        "core_conclusion": {{
-            "one_sentence": "一句话核心结论（30字以内）",
-            "signal_type": "🟢买入信号/🟡持有观望/🔴卖出信号/⚠️风险警告",
-            "time_sensitivity": "立即行动/今日内/本周内/不急",
-            "position_advice": {{
-                "no_position": "空仓者建议",
-                "has_position": "持仓者建议"
-            }}
-        }},
-        "data_perspective": {{
-            "trend_status": {{"ma_alignment": "", "is_bullish": true, "trend_score": 0}},
-            "price_position": {{"current_price": 0, "ma5": 0, "ma10": 0, "ma20": 0, "bias_ma5": 0, "bias_status": "", "support_level": 0, "resistance_level": 0}},
-            "volume_analysis": {{"volume_ratio": 0, "volume_status": "", "turnover_rate": 0, "volume_meaning": ""}},
-            "chip_structure": {{"profit_ratio": 0, "avg_cost": 0, "concentration": 0, "chip_health": ""}}
-        }},
-        "intelligence": {{
-            "latest_news": "",
-            "risk_alerts": [],
-            "positive_catalysts": [],
-            "earnings_outlook": "",
-            "sentiment_summary": ""
-        }},
-        "battle_plan": {{
-            "sniper_points": {{"ideal_buy": "", "secondary_buy": "", "stop_loss": "", "take_profit": ""}},
-            "position_strategy": {{"suggested_position": "", "entry_plan": "", "risk_control": ""}},
-            "action_checklist": []
-        }}
-    }},
-    "analysis_summary": "100字综合分析摘要",
-    "key_points": "3-5个核心看点，逗号分隔",
-    "risk_warning": "风险提示",
-    "buy_reason": "操作理由，引用激活技能或风险框架",
-    "trend_analysis": "走势形态分析",
-    "short_term_outlook": "短期1-3日展望",
-    "medium_term_outlook": "中期1-2周展望",
-    "technical_analysis": "技术面综合分析",
-    "ma_analysis": "均线系统分析",
-    "volume_analysis": "量能分析",
-    "pattern_analysis": "K线形态分析",
-    "fundamental_analysis": "基本面分析",
-    "sector_position": "板块行业分析",
-    "company_highlights": "公司亮点/风险",
-    "news_summary": "新闻摘要",
-    "market_sentiment": "市场情绪",
-    "hot_topics": "相关热点"
-}}
-```
+最终响应必须是有效的 JSON 对象，必须包含以下顶层字段：
 
-## 评分标准
+- `stock_name`, `sentiment_score`, `trend_prediction`, `operation_advice`, `decision_type`, `confidence_level`
+- `dashboard`: 含 `core_conclusion`（one_sentence, signal_type, time_sensitivity, position_advice）、`data_perspective`（trend_status, price_position, volume_analysis, chip_structure）、`intelligence`（latest_news, risk_alerts, positive_catalysts, earnings_outlook, sentiment_summary）、`battle_plan`（sniper_points, position_strategy, action_checklist）
+- `analysis_summary`, `key_points`, `risk_warning`, `buy_reason`
+- `trend_analysis`, `technical_analysis`, `ma_analysis`, `volume_analysis`, `pattern_analysis`
+- `fundamental_analysis`, `sector_position`, `company_highlights`, `news_summary`, `market_sentiment`, `hot_topics`
 
-### 强烈买入（80-100分）：
-- ✅ 多个激活技能同时支持积极结论
-- ✅ 上行空间、触发条件与风险回报清晰
-- ✅ 关键风险已排查，仓位与止损计划明确
-- ✅ 重要数据和情报结论彼此一致
-
-### 买入（60-79分）：
-- ✅ 主信号偏积极，但仍有少量待确认项
-- ✅ 允许存在可控风险或次优入场点
-- ✅ 需要在报告中明确补充观察条件
-
-### 观望（40-59分）：
-- ⚠️ 信号分歧较大，或缺乏足够确认
-- ⚠️ 风险与机会大致均衡
-- ⚠️ 更适合等待触发条件或回避不确定性
-
-### 卖出/减仓（0-39分）：
-- ❌ 主要结论转弱，风险明显高于收益
-- ❌ 触发了止损/失效条件或重大利空
-- ❌ 现有仓位更需要保护而不是进攻
+评分标准由激活的 `skill_policy` 定义（如有）。
 
 ## 决策仪表盘核心原则
 
@@ -496,6 +353,90 @@ class AgentExecutor:
         ]
 
         return self._run_loop(messages, tool_decls, parse_dashboard=True)
+
+    def run_once(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+        """单次 LLM 调用，无工具交互，直接生成决策仪表盘。
+
+        适用于数据已在外部预取并格式化的场景（如 Pipeline 的 SEPA 分析路径），
+        避免 ReAct 循环带来的多次 LLM 调用和 prompt 膨胀。
+
+        Args:
+            task: 分析任务描述（如"请分析股票 600519"）。
+            context: 可选上下文字典。若包含 "formatted_data" 键，
+                     则直接使用其值作为 user message 主体，跳过 _build_user_message。
+
+        Returns:
+            AgentResult，其中 dashboard 为解析后的 JSON 字典。
+        """
+        # 1. 构建 system prompt（与 run() 一致）
+        skills_section = ""
+        if self.skill_instructions:
+            skills_section = f"## 激活的交易技能\n\n{self.skill_instructions}"
+        default_skill_policy_section = ""
+        if self.default_skill_policy:
+            default_skill_policy_section = f"\n{self.default_skill_policy}\n"
+        report_language = normalize_report_language((context or {}).get("report_language", "zh"))
+        stock_code = (context or {}).get("stock_code", "")
+        market_role = get_market_role(stock_code, report_language)
+        market_guidelines = get_market_guidelines(stock_code, report_language)
+        prompt_template = (
+            LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT
+            if self.use_legacy_default_prompt
+            else AGENT_SYSTEM_PROMPT
+        )
+        system_prompt = prompt_template.format(
+            market_role=market_role,
+            market_guidelines=market_guidelines,
+            default_skill_policy_section=default_skill_policy_section,
+            skills_section=skills_section,
+            language_section=_build_language_section(report_language),
+        )
+
+        # 2. 构建 user message
+        if context and context.get("formatted_data"):
+            # 数据已预取，强制 LLM 直接输出 JSON，禁止 Markdown/阶段说明
+            user_content = (
+                "【指令】所有分析数据已提供在下方，你不需要调用任何工具，也不允许输出分析过程、"
+                "Markdown 表格或阶段说明。你的唯一任务是直接基于这些数据生成一个有效的"
+                "决策仪表盘 JSON 对象。JSON 前后不要有任何额外文本，只输出纯 JSON。\n\n"
+                + context["formatted_data"]
+            )
+        else:
+            user_content = self._build_user_message(task, context)
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+        # 3. 单次 LLM 调用（无 tools）
+        # run_once 是单次调用，timeout 不宜过长；若未配置或超过 180s，限制为 180s
+        call_timeout = self.timeout_seconds
+        if call_timeout is None or call_timeout <= 0 or call_timeout > 180:
+            call_timeout = 180
+        response = self.llm_adapter.call_text(
+            messages,
+            timeout=call_timeout,
+        )
+
+        # 4. 解析结果
+        content = response.content or ""
+        dashboard = parse_dashboard_json(content)
+        usage = response.usage or {}
+        total_tokens = 0
+        if isinstance(usage, dict):
+            total_tokens = usage.get("total_tokens", 0) or usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+
+        return AgentResult(
+            success=dashboard is not None,
+            content=content,
+            dashboard=dashboard,
+            total_steps=1,
+            total_tokens=total_tokens,
+            provider=response.provider,
+            model=response.model,
+            error=None if dashboard else "Failed to parse dashboard JSON from single-turn response",
+        )
 
     def chat(self, message: str, session_id: str, progress_callback: Optional[Callable] = None, context: Optional[Dict[str, Any]] = None) -> AgentResult:
         """Execute the agent loop for a free-form chat message.

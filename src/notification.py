@@ -1014,6 +1014,7 @@ class NotificationService(
                     ])
                     # 狙击点位
                     sniper = battle.get('sniper_points', {})
+                    sniper = sniper if isinstance(sniper, dict) else {}
                     if sniper:
                         report_lines.extend([
                             f"**📍 {labels['action_points_heading']}**",
@@ -1207,6 +1208,7 @@ class NotificationService(
                 
                 # 狙击点位
                 sniper = battle.get('sniper_points', {}) if battle else {}
+                sniper = sniper if isinstance(sniper, dict) else {}
                 if sniper:
                     ideal_buy = str(sniper.get('ideal_buy', ''))
                     stop_loss = str(sniper.get('stop_loss', ''))
@@ -1476,6 +1478,7 @@ class NotificationService(
         
         # 狙击点位
         sniper = battle.get('sniper_points', {}) if battle else {}
+        sniper = sniper if isinstance(sniper, dict) else {}
         if sniper:
             lines.extend([
                 f"### 🎯 {labels['action_points_heading']}",

@@ -167,6 +167,17 @@ def load_history_df(
         manager = _get_fetcher_manager()
         df, source = manager.get_daily_data(stock_code, days=days)
         if df is not None and not df.empty:
+            # Persist to DB so subsequent reads are cached
+            try:
+                db.save_daily_data(df, stock_code, data_source=source)
+                logger.debug(
+                    "load_history_df(%s): saved %d rows to DB (source: %s)",
+                    stock_code, len(df), source,
+                )
+            except Exception as save_err:
+                logger.debug(
+                    "load_history_df(%s): DB save failed: %s", stock_code, save_err
+                )
             return df, source
     except Exception as e:
         logger.warning("load_history_df(%s): DataFetcherManager failed: %s", stock_code, e)

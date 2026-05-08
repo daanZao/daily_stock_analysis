@@ -60,6 +60,60 @@ def _is_etf_code(stock_code: str) -> bool:
     return code.startswith(_ETF_ALL_PREFIXES) and len(code) == 6
 
 
+# A-share index codes (SSE/SZSE indices) that require index_daily API
+# Mapping: raw code -> Tushare exchange suffix
+#
+# Note: some index codes overlap with A-share stocks (e.g. 000001 is both
+# 上证指数 and 平安银行).  Ambiguous codes are listed separately and require
+# an explicit exchange hint (e.g. "sh000001" or "000001.SH") to be treated
+# as an index; otherwise they default to stock behaviour.
+_UNAMBIGUOUS_INDEX_CODES: Dict[str, str] = {
+    '000300': 'SH',   # 沪深300
+    '000905': 'SH',   # 中证500
+    '000852': 'SH',   # 中证1000
+    '399001': 'SZ',   # 深证成指
+    '399006': 'SZ',   # 创业板指
+    '399005': 'SZ',   # 中小板指
+    '399673': 'SZ',   # 创业板50
+}
+
+_AMBIGUOUS_INDEX_CODES: Dict[str, str] = {
+    '000001': 'SH',   # 上证指数 (stock: 000001.SZ 平安银行)
+    '000016': 'SH',   # 上证50   (stock: 000016.SZ 深科技)
+    '000688': 'SH',   # 科创50   (stock: 000688.SZ 国城矿业)
+}
+
+_ASHARE_INDEX_CODES: Dict[str, str] = {**_UNAMBIGUOUS_INDEX_CODES, **_AMBIGUOUS_INDEX_CODES}
+
+
+def _is_ashare_index_code(stock_code: str) -> bool:
+    """Check if code is a known A-share market index."""
+    raw = stock_code.strip().upper()
+    # Strip exchange prefix (e.g. sh000001 -> 000001)
+    code = raw
+    if code.startswith('SH') or code.startswith('SZ'):
+        code = code[2:]
+    code = code.split('.')[0]
+    if code not in _ASHARE_INDEX_CODES:
+        return False
+    # Ambiguous codes (also exist as stocks) require explicit SH/SZ hint
+    if code in _AMBIGUOUS_INDEX_CODES:
+        if raw.endswith('.SH') or raw.startswith('SH'):
+            return True
+        return False
+    return True
+
+
+def _get_index_ts_code(stock_code: str) -> str:
+    """Return Tushare ts_code for an A-share index (e.g. 000300.SH)."""
+    code = stock_code.strip().upper()
+    if code.startswith('SH') or code.startswith('SZ'):
+        code = code[2:]
+    code = code.split('.')[0]
+    suffix = _ASHARE_INDEX_CODES.get(code, 'SH')
+    return f"{code}.{suffix}"
+
+
 def _is_us_code(stock_code: str) -> bool:
     """
     判断代码是否为美股
@@ -456,11 +510,15 @@ class TushareFetcher(BaseFetcher):
         self._check_rate_limit()
         
         is_hk = _is_hk_market(stock_code)
-         # 判断是否为 ETF / 港股，以选择不同接口
         is_etf = _is_etf_code(stock_code)
+        is_index = _is_ashare_index_code(stock_code)
+
         if is_hk:
             ts_code = self._convert_hk_stock_code_for_tushare(stock_code)
             api_name = "hk_daily"
+        elif is_index:
+            ts_code = _get_index_ts_code(stock_code)
+            api_name = "index_daily"
         else:
             ts_code = self._convert_stock_code(stock_code)
             api_name = "fund_daily" if is_etf else "daily"
@@ -477,6 +535,13 @@ class TushareFetcher(BaseFetcher):
             if is_hk:
                 # 港股使用 hk_daily 接口
                 df = self._api.hk_daily(
+                    ts_code=ts_code,
+                    start_date=ts_start,
+                    end_date=ts_end,
+                )
+            elif is_index:
+                # A-share indices use index_daily interface
+                df = self._api.index_daily(
                     ts_code=ts_code,
                     start_date=ts_start,
                     end_date=ts_end,
@@ -511,14 +576,14 @@ class TushareFetcher(BaseFetcher):
     def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
         """
         标准化 Tushare 数据
-        
-        Tushare daily / fund_daily 返回的列名：
+
+        Tushare daily / fund_daily / index_daily 返回的列名：
         ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount
-        
+
         需要映射到标准列名：
         date, open, high, low, close, volume, amount, pct_chg
 
-        单位缩放仅适用于 A 股（及 ETF 等使用同一套单位的接口）：
+        单位缩放仅适用于 A 股（及 ETF / 指数等使用同一套单位的接口）：
         - vol 按「手」计，乘以 100 转为「股」
         - amount 按「千元」计，乘以 1000 转为「元」
 

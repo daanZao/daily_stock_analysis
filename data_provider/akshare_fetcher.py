@@ -354,8 +354,67 @@ class AkshareFetcher(BaseFetcher):
         elif _is_etf_code(stock_code):
             return self._fetch_etf_data(stock_code, start_date, end_date)
         else:
+            # A-share index (e.g. CSI300 000300) needs the dedicated index API
+            from .tushare_fetcher import _is_ashare_index_code
+            if _is_ashare_index_code(stock_code):
+                return self._fetch_index_data(stock_code, start_date, end_date)
             return self._fetch_stock_data(stock_code, start_date, end_date)
     
+    def _fetch_index_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        获取 A 股指数历史数据（新浪财经）
+
+        ak.stock_zh_index_daily 使用 sh/sz 前缀格式（如 sh000300）。
+        返回的列名为英文（date/open/high/low/close/volume），
+        在此转换为中文列名以匹配 _normalize_data 的处理流程。
+        """
+        import akshare as ak
+        import pandas as pd
+
+        # 构建新浪财经指数代码（sh000300 / sz399001）
+        # 000xxx 系列是上海指数，399xxx 系列是深圳指数
+        base = stock_code.strip().split(".")[0] if "." in stock_code else stock_code.strip()
+        if base.startswith("399"):
+            symbol = f"sz{base}"
+        else:
+            # 000xxx, 880xxx 等均为上海市场指数
+            symbol = f"sh{base}"
+        self._enforce_rate_limit()
+
+        logger.info(f"[API调用] ak.stock_zh_index_daily(symbol={symbol})")
+
+        df = ak.stock_zh_index_daily(symbol=symbol)
+        if df is None or df.empty:
+            raise DataFetchError(f"Akshare 指数接口返回空数据: {stock_code}")
+
+        # 过滤日期范围
+        df['date'] = pd.to_datetime(df['date'])
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)].copy()
+
+        if df.empty:
+            raise DataFetchError(f"Akshare 指数接口在日期范围内无数据: {stock_code}")
+
+        # 英文列名 → 中文列名（与 stock_zh_a_hist 保持一致，便于 _normalize_data 处理）
+        df = df.rename(columns={
+            'date': '日期',
+            'open': '开盘',
+            'high': '最高',
+            'low': '最低',
+            'close': '收盘',
+            'volume': '成交量',
+        })
+
+        # 指数数据无成交额，填充 0
+        df['成交额'] = 0.0
+
+        # 计算涨跌幅
+        df['涨跌幅'] = df['收盘'].pct_change() * 100
+        df['涨跌幅'] = df['涨跌幅'].fillna(0)
+
+        return df
+
     def _fetch_stock_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
         获取普通 A 股历史数据
